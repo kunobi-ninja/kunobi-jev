@@ -1,5 +1,7 @@
 # kunobi-jev
 
+[![Crates.io](https://img.shields.io/crates/v/kunobi-jev.svg)](https://crates.io/crates/kunobi-jev)
+[![Docs.rs](https://img.shields.io/docsrs/kunobi-jev)](https://docs.rs/kunobi-jev)
 [![CI](https://github.com/kunobi-ninja/kunobi-jev/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunobi-ninja/kunobi-jev/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](Cargo.toml)
@@ -18,10 +20,12 @@ Jev has three question types:
 
 All questions in one call are answered against the same state in a single request.
 
+This is an unofficial client, maintained by Kunobi. It is not affiliated with TypeSafe.
+
 ## Install
 
 ```toml
-kunobi-jev = { git = "https://github.com/kunobi-ninja/kunobi-jev", tag = "v0.1.0" }
+kunobi-jev = "0.1"
 ```
 
 Calls run on Tokio.

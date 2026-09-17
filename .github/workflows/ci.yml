@@ -1,8 +1,8 @@
 name: CI
 
 on:
+  # Every pull request, including ones stacked on another branch.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -25,10 +25,9 @@ jobs:
       image: rust:1.94-bookworm
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -43,13 +42,13 @@ jobs:
       # Installs Rust from .mise.toml so local and CI toolchains share one
       # source of truth.
       - name: Install mise tools
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           experimental: true
           install_args: rust@1.94.1
 
       - name: Install coverage tool
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-tarpaulin@0.35.4
 
@@ -67,7 +66,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
           path: coverage/tarpaulin-report.json
@@ -76,6 +75,11 @@ jobs:
       - name: Build docs
         run: cargo doc --lib --no-deps --all-features
 
+      # Builds the crate from exactly the files that would be published, so a
+      # missing entry in `include` fails here instead of on crates.io.
+      - name: Verify package
+        run: cargo package --locked
+
   deny:
     name: cargo-deny
     runs-on: kunobi-runners
@@ -83,10 +87,9 @@ jobs:
       image: rust:1.94-bookworm
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/bin
@@ -97,7 +100,7 @@ jobs:
           restore-keys: cargo-deny-${{ runner.os }}-
 
       - name: Install cargo-deny
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           experimental: true
           install_args: aqua:EmbarkStudios/cargo-deny@0.19.4
@@ -122,12 +125,12 @@ jobs:
         if: env.TYPESAFE_API_KEY == ''
         run: echo "::notice::TYPESAFE_API_KEY is not set; skipping live API tests."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.TYPESAFE_API_KEY != ''
 
       - name: Cache cargo
         if: env.TYPESAFE_API_KEY != ''
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -138,7 +141,7 @@ jobs:
 
       - name: Install mise tools
         if: env.TYPESAFE_API_KEY != ''
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           experimental: true
           install_args: rust@1.94.1

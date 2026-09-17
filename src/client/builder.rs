@@ -113,14 +113,16 @@ impl ClientBuilder {
         self
     }
 
-    /// Timeout per attempt, including the response body. There is no total budget across retries.
-    /// A credential provider gets the same timeout. Default: 10 s.
+    /// Timeout per attempt, including the response body. Default: 10 s.
+    ///
+    /// A credential provider gets the same timeout. To bound a whole call, retries
+    /// included, use [`ClientBuilder::total_timeout`].
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
-    /// Upper bound for a whole call, including retries and backoff. Default: none.
+    /// Upper bound for a whole call, including credentials, retries and backoff. Default: none.
     ///
     /// Per-call [`Call::total_timeout`](crate::Call::total_timeout) takes precedence.
     pub fn total_timeout(mut self, total_timeout: Duration) -> Self {
@@ -263,6 +265,7 @@ impl fmt::Debug for ClientBuilder {
             .field("default_model", &self.default_model)
             .field("retry", &self.retry)
             .field("timeout", &self.timeout)
+            .field("total_timeout", &self.total_timeout)
             .finish_non_exhaustive()
     }
 }

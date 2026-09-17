@@ -31,7 +31,8 @@ pub trait Labels: Sized + Copy + Eq + 'static {
 ///
 /// Each variant names its wire label and, optionally, a description the model
 /// sees. The macro derives `Clone`, `Copy`, `PartialEq`, `Eq`, `Hash` and
-/// `Debug`; don't derive those again.
+/// `Debug`; don't derive those again. `#[cfg]` on the enum or its variants is not
+/// supported, because the generated `Labels` impl lists every variant.
 ///
 /// ```
 /// kunobi_jev::labels! {

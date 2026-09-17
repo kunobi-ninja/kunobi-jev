@@ -155,7 +155,8 @@ println!("request {:?}", models.request_id);
 
 Nothing is sent until the call is awaited. Dropping the future cancels the request
 and any pending retry. `total_timeout` bounds a whole call: attempts are shortened to
-fit, and a retry that could not finish in time is not started.
+fit the time left, a retry is skipped when its backoff would end past the bound, and a
+retry cut short by the bound returns the previous attempt's error.
 
 ## Credentials
 

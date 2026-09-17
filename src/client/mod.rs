@@ -45,6 +45,7 @@ struct Inner {
     default_model: String,
     retry: RetryPolicy,
     timeout: Duration,
+    total_timeout: Option<Duration>,
     default_headers: HeaderMap,
     http: reqwest::Client,
     /// Numbers requests so concurrent calls, and the attempts within one, can be told apart in logs.
@@ -84,6 +85,11 @@ impl Client {
     /// Timeout per attempt for calls that do not override it.
     pub fn timeout(&self) -> Duration {
         self.inner.timeout
+    }
+
+    /// Upper bound for a whole call, for calls that do not override it.
+    pub fn total_timeout(&self) -> Option<Duration> {
+        self.inner.total_timeout
     }
 
     /// Headers sent with every request.

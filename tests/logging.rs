@@ -71,6 +71,14 @@ async fn run_logged(log_bodies: bool) -> String {
 async fn logs_never_contain_the_key_and_skip_bodies_by_default() {
     let quiet = run_logged(false).await;
     assert!(quiet.contains("POST /v1/systemone"), "{quiet}");
+    for field in [
+        "typesafe.request{",
+        "http.request.method=POST",
+        "url.path=\"/v1/systemone\"",
+        "http.response.status_code=200",
+    ] {
+        assert!(quiet.contains(field), "{field} missing: {quiet}");
+    }
     assert!(quiet.contains("Bearer ***cdef"), "{quiet}");
     assert!(!quiet.contains(SECRET), "{quiet}");
     for marker in ["state-marker", "request-marker", "response-marker"] {

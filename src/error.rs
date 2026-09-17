@@ -71,13 +71,13 @@ pub enum Error {
         source: crate::credentials::BoxError,
     },
 
-    /// The response has no answer of the expected type under this name.
-    #[error("The response has no {expected} answer named \"{name}\".")]
-    MissingAnswer {
+    /// An answer is missing, has another type, or uses a label the typed key doesn't know.
+    #[error("Unexpected answer \"{name}\": {reason}.")]
+    UnexpectedAnswer {
         /// The question name.
         name: String,
-        /// The answer type that was expected.
-        expected: &'static str,
+        /// What didn't match.
+        reason: String,
     },
 }
 

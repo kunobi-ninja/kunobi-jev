@@ -78,6 +78,50 @@ if you need to walk them.
 State and descriptions are an `Entry`: text, a JSON object, a JSON array, or null.
 Use `Entry::from_serialize(&value)` for your own structs. Object key order is kept.
 
+### Typed labels
+
+Declare choice labels as an enum and match on it instead of on strings:
+
+```rust
+use kunobi_jev::{Client, Questions, SystemOneRequest, choice_of};
+
+kunobi_jev::labels! {
+    pub enum Team {
+        Billing = "billing": "Payment or subscription issues",
+        Technical = "technical": "Bugs or integration problems",
+        Other = "other",
+    }
+}
+
+async fn route(client: &Client, ticket: &str) -> kunobi_jev::Result<Option<Team>> {
+    let mut questions = Questions::new();
+    let team = questions.add("team", choice_of::<Team>("Which team should handle this?"));
+    let result = client.system_one(SystemOneRequest::new(ticket, questions)).await?;
+    Ok(result.answer(&team)?.decide(0.6))
+}
+```
+
+`decide(min_confidence)` returns the label only when confidence reaches the threshold,
+so unclear cases can go to a person. Scores and yes/no answers have `decide` and
+`is_yes` helpers too. A label the enum doesn't know fails with `Error::UnexpectedAnswer`.
+
+### Testing your code
+
+Take `&dyn SystemOne` (or `impl SystemOne`) instead of `Client`. With the `testing`
+feature, `FakeSystemOne` answers from a script, checks each scripted answer against the
+question, and records the requests it received:
+
+```toml
+[dev-dependencies]
+kunobi-jev = { version = "0.1", features = ["testing"] }
+```
+
+```rust
+let jev = FakeSystemOne::new()
+    .noul("billing", 0.92)
+    .choice_of("team", Team::Billing, 0.81);
+```
+
 ## Configuration
 
 `Client::new()` reads the environment. `Client::builder()` sets values in code,
@@ -89,13 +133,14 @@ which take precedence.
 | `base_url` | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai`; must be https |
 | `default_model` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
 | `timeout` | | 10 s per attempt |
+| `total_timeout` | | none; bounds a whole call, retries included |
 | `retry` | | `RetryPolicy::default()` |
 | `default_header` | | none |
 | `http_client` | | a new `reqwest::Client` |
 | `log_bodies` | | off |
 | `allow_insecure_http` | | off |
 
-Per call, you can override the timeout, the retry policy and headers:
+Per call, you can override the timeouts, the retry policy and headers:
 
 ```rust
 let models = client
@@ -109,8 +154,8 @@ println!("request {:?}", models.request_id);
 ```
 
 Nothing is sent until the call is awaited. Dropping the future cancels the request
-and any pending retry, so wrap it in `tokio::time::timeout` or `select!` to bound
-the total time.
+and any pending retry. `total_timeout` bounds a whole call: attempts are shortened to
+fit, and a retry that could not finish in time is not started.
 
 ## Credentials
 
@@ -176,11 +221,15 @@ Errors are one `kunobi_jev::Error` enum:
   set, a score with fewer than two levels, a missing API key, or a plain-http URL.
 - `Credentials`: the credential provider failed, timed out, or returned an unusable token.
 - `Decode`: a 2xx body with an unexpected shape.
-- `MissingAnswer`: `result.answer(&key)` found no answer of that type under that name.
+- `UnexpectedAnswer`: `result.answer(&key)` found no answer under that name, an answer of
+  another type, or a label the key's enum doesn't know.
 
 ## Logging
 
-Requests log through `tracing`. Each attempt logs a summary at `info`, such as
+Each call runs in a `typesafe.request` span with OpenTelemetry-style fields:
+`http.request.method`, `url.path`, `http.response.status_code`,
+`http.request.resend_count`, `typesafe.request_id` and `error.type`. Each attempt logs a
+summary at `info`, such as
 `#3 POST /v1/systemone <- 200 in 212ms (request req_…)`, and redacted headers at
 `debug`. Request and response bodies are not logged unless you call
 `log_bodies(true)`: they contain the state you send, which may include personal data.

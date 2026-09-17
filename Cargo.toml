@@ -10,6 +10,10 @@ readme = "README.md"
 keywords = ["typesafe", "jev", "classification", "ai", "api-client"]
 categories = ["api-bindings", "web-programming::http-client"]
 
+[features]
+# `testing::FakeSystemOne`, a scripted `SystemOne` for tests in code that uses this crate.
+testing = []
+
 [dependencies]
 # HTTP. `rustls` keeps the TLS stack pure Rust; callers can pass their own
 # `reqwest::Client` through `ClientBuilder::http_client`.

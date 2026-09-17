@@ -46,26 +46,34 @@ pub mod answers;
 pub mod client;
 pub mod credentials;
 pub mod error;
+pub mod labels;
 pub mod questions;
 pub mod request;
 pub mod retry;
+pub mod system_one;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod types;
 
 mod redact;
 
-pub use answers::{Answer, AnswerKind, ChoiceAnswer, NoulAnswer, ScoreAnswer, SystemOneResult};
+pub use answers::{
+    Answer, AnswerKind, ChoiceAnswer, NoulAnswer, ScoreAnswer, SystemOneResult, TypedChoiceAnswer,
+};
 pub use client::{
     Call, Client, ClientBuilder, DEFAULT_BASE_URL, DEFAULT_MODEL, ENV_API_KEY, ENV_BASE_URL,
     ENV_DEFAULT_MODEL, Models, RawResponse, WithResponse,
 };
 pub use credentials::{BoxError, CredentialProvider, ExposeSecret, SecretString, TokenFuture};
 pub use error::{ApiError, ApiErrorKind, Error, ErrorBody, REQUEST_ID_HEADER, Result};
+pub use labels::Labels;
 pub use questions::{
     AnswerKey, ChoiceQuestion, NoulCriteria, NoulQuestion, Question, QuestionKind, Questions,
-    ScoreQuestion, choice, choice_labels, noul, score,
+    ScoreQuestion, TypedChoice, choice, choice_labels, choice_of, noul, score,
 };
 pub use request::SystemOneRequest;
 pub use retry::{DEFAULT_TIMEOUT, RetryPolicy, parse_retry_after};
+pub use system_one::{AskFuture, SystemOne};
 pub use types::{Entry, ModelCard, Usage};
 
 /// Re-exported so callers can build headers and HTTP clients with matching versions.

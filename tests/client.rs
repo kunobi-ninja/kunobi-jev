@@ -552,3 +552,86 @@ async fn requests_can_override_the_model_and_forward_extra_fields() {
     assert_eq!(second["model"], "jev-2");
     assert_eq!(second["trace"], "abc");
 }
+
+#[tokio::test]
+async fn total_timeout_skips_a_retry_that_cannot_finish() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(503).insert_header("retry-after-ms", "400"))
+        .mount(&server)
+        .await;
+
+    let started = Instant::now();
+    let err = client(&server)
+        .models()
+        .list()
+        .total_timeout(Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert!(
+        started.elapsed() < Duration::from_millis(350),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(received(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn total_timeout_shortens_a_slow_attempt() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(models_body())
+                .set_delay(Duration::from_millis(800)),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .api_key("k")
+        .base_url(server.uri())
+        .retry(fast_retry())
+        .timeout(Duration::from_secs(10))
+        .total_timeout(Duration::from_millis(150))
+        .build()
+        .unwrap();
+    assert_eq!(client.total_timeout(), Some(Duration::from_millis(150)));
+
+    let started = Instant::now();
+    let err = client.models().list().await.unwrap_err();
+    assert!(err.is_timeout(), "{err:?}");
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "{:?}",
+        started.elapsed()
+    );
+
+    let err = Client::builder()
+        .api_key("k")
+        .total_timeout(Duration::ZERO)
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("total_timeout"), "{err}");
+}
+
+#[tokio::test]
+async fn the_client_implements_system_one() {
+    use kunobi_jev::SystemOne;
+
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/systemone"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(system_one_body()))
+        .mount(&server)
+        .await;
+
+    let jev: std::sync::Arc<dyn SystemOne> = std::sync::Arc::new(client(&server));
+    let mut questions = Questions::new();
+    let billing = questions.add("billing", noul("Billing?"));
+    let result = jev
+        .ask(SystemOneRequest::new("s", questions))
+        .await
+        .unwrap();
+    assert!(result.answer(&billing).unwrap().is_yes(0.9));
+}

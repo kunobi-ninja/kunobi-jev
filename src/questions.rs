@@ -6,8 +6,9 @@ use std::marker::PhantomData;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::answers::{AnswerKind, ChoiceAnswer, NoulAnswer, ScoreAnswer};
+use crate::answers::{AnswerKind, ChoiceAnswer, NoulAnswer, ScoreAnswer, TypedChoiceAnswer};
 use crate::error::{Error, Result};
+use crate::labels::Labels;
 use crate::types::Entry;
 
 /// A question, tagged by `type` on the wire.
@@ -125,6 +126,73 @@ pub fn choice_labels<K: Into<String>>(
         instructions,
         labels.into_iter().map(|label| (label, Entry::Null)),
     )
+}
+
+/// A choice whose labels come from a [`Labels`] enum; answered with [`TypedChoiceAnswer`].
+///
+/// Created by [`choice_of`].
+pub struct TypedChoice<L> {
+    question: ChoiceQuestion,
+    labels: PhantomData<fn() -> L>,
+}
+
+impl<L> TypedChoice<L> {
+    /// The untyped question sent on the wire.
+    pub fn question(&self) -> &ChoiceQuestion {
+        &self.question
+    }
+}
+
+impl<L> Clone for TypedChoice<L> {
+    fn clone(&self) -> Self {
+        Self {
+            question: self.question.clone(),
+            labels: PhantomData,
+        }
+    }
+}
+
+impl<L> fmt::Debug for TypedChoice<L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TypedChoice").field(&self.question).finish()
+    }
+}
+
+/// Create a choice between the labels of a [`Labels`] enum, in declaration order.
+///
+/// ```
+/// use kunobi_jev::{Questions, choice_of};
+///
+/// kunobi_jev::labels! {
+///     pub enum Tone {
+///         Calm = "calm",
+///         Angry = "angry": "Strong language or threats",
+///     }
+/// }
+///
+/// let mut questions = Questions::new();
+/// let tone = questions.add("tone", choice_of::<Tone>("What is the tone?"));
+/// ```
+pub fn choice_of<L: Labels>(instructions: impl Into<Entry>) -> TypedChoice<L> {
+    TypedChoice {
+        question: choice(
+            instructions,
+            L::ALL
+                .iter()
+                .map(|(_, label, description)| (*label, description.map(Entry::from))),
+        ),
+        labels: PhantomData,
+    }
+}
+
+impl<L: Labels> From<TypedChoice<L>> for Question {
+    fn from(question: TypedChoice<L>) -> Self {
+        Question::Choice(question.question)
+    }
+}
+
+impl<L: Labels> QuestionKind for TypedChoice<L> {
+    type Answer = TypedChoiceAnswer<L>;
 }
 
 /// Create a score question from level descriptions, lowest score first.
@@ -352,6 +420,27 @@ mod tests {
                     "criteria": ["calm", "civil", "angry"]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn typed_choices_send_labels_and_descriptions_in_order() {
+        crate::labels! {
+            enum Team {
+                Billing = "billing": "Payments",
+                Other = "other",
+            }
+        }
+        let mut questions = Questions::new();
+        let key = questions.add("team", choice_of::<Team>("Which team?"));
+        assert_eq!(key.name(), "team");
+        assert_eq!(
+            serde_json::to_value(&questions).unwrap(),
+            json!({"team": {
+                "type": "choice",
+                "instructions": "Which team?",
+                "criteria": {"billing": "Payments", "other": null}
+            }})
         );
     }
 

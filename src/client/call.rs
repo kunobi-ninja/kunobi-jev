@@ -58,6 +58,7 @@ pub struct Call<T> {
     path: &'static str,
     body: Result<Option<Bytes>>,
     timeout: Option<Duration>,
+    total_timeout: Option<Duration>,
     retry: Option<RetryPolicy>,
     max_retries: Option<u32>,
     headers: HeaderMap,
@@ -104,6 +105,7 @@ impl<T> Call<T> {
             path,
             body: body.map(|body| body.map(Bytes::from)),
             timeout: None,
+            total_timeout: None,
             retry: None,
             max_retries: None,
             headers: HeaderMap::new(),
@@ -114,6 +116,15 @@ impl<T> Call<T> {
     /// Timeout per attempt for this call.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Upper bound for the whole call, including retries and backoff.
+    ///
+    /// Attempts are shortened to fit, and a retry whose backoff would end past the
+    /// bound is not started: the last error is returned instead.
+    pub fn total_timeout(mut self, total_timeout: Duration) -> Self {
+        self.total_timeout = Some(total_timeout);
         self
     }
 
@@ -174,6 +185,12 @@ impl<T> Call<T> {
     fn resolve(self) -> Result<Resolved> {
         let body = self.body?;
         let timeout = validate_timeout(self.timeout.unwrap_or(self.client.timeout()))?;
+        let total_timeout = match self.total_timeout.or(self.client.total_timeout()) {
+            Some(total) => Some(validate_timeout(total).map_err(|_| {
+                Error::Config("`total_timeout` must be a positive duration, got 0.".into())
+            })?),
+            None => None,
+        };
         let mut retry = self.retry.unwrap_or_else(|| self.client.retry().clone());
         if let Some(max_retries) = self.max_retries {
             retry.max_retries = max_retries;
@@ -189,6 +206,7 @@ impl<T> Call<T> {
             headers,
             timeout,
             retry,
+            total_timeout,
         })
     }
 }

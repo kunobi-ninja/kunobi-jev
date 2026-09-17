@@ -29,6 +29,7 @@ pub struct ClientBuilder {
     default_model: Option<String>,
     retry: Option<RetryPolicy>,
     timeout: Option<Duration>,
+    total_timeout: Option<Duration>,
     default_headers: HeaderMap,
     http_client: Option<reqwest::Client>,
 }
@@ -119,6 +120,14 @@ impl ClientBuilder {
         self
     }
 
+    /// Upper bound for a whole call, including retries and backoff. Default: none.
+    ///
+    /// Per-call [`Call::total_timeout`](crate::Call::total_timeout) takes precedence.
+    pub fn total_timeout(mut self, total_timeout: Duration) -> Self {
+        self.total_timeout = Some(total_timeout);
+        self
+    }
+
     /// Add a header sent with every request. Per-call headers take precedence.
     pub fn default_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.default_headers.insert(name, value);
@@ -176,6 +185,11 @@ impl ClientBuilder {
         let retry = self.retry.unwrap_or_default();
         retry.validate()?;
         let timeout = validate_timeout(self.timeout.unwrap_or(DEFAULT_TIMEOUT))?;
+        if self.total_timeout.is_some_and(|total| total.is_zero()) {
+            return Err(Error::Config(
+                "`total_timeout` must be a positive duration, got 0.".into(),
+            ));
+        }
 
         let http = match self.http_client {
             Some(http) => http,
@@ -192,6 +206,7 @@ impl ClientBuilder {
                 default_model,
                 retry,
                 timeout,
+                total_timeout: self.total_timeout,
                 default_headers: self.default_headers,
                 http,
                 request_count: AtomicU64::new(0),

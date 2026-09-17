@@ -72,6 +72,12 @@ jobs:
           path: coverage/tarpaulin-report.json
           if-no-files-found: warn
 
+      - name: Build (native-tls only)
+        run: cargo build --no-default-features --features native-tls
+
+      - name: Tests (no TLS backend)
+        run: cargo test --no-default-features
+
       - name: Build docs
         run: cargo doc --lib --no-deps --all-features
 

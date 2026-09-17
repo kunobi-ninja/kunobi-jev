@@ -695,3 +695,86 @@ async fn credential_time_counts_against_the_total_timeout() {
     assert!(err.is_timeout(), "{err:?}");
     assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
 }
+
+#[tokio::test]
+async fn max_concurrent_requests_queues_calls() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(models_body())
+                .set_delay(Duration::from_millis(150)),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .api_key("k")
+        .base_url(server.uri())
+        .max_concurrent_requests(1)
+        .build()
+        .unwrap();
+    assert_eq!(client.max_concurrent_requests(), Some(1));
+
+    let started = Instant::now();
+    let (first, second) = tokio::join!(client.models().list(), client.models().list());
+    first.unwrap();
+    second.unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(290),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn waiting_for_a_slot_counts_against_the_total_timeout() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(models_body())
+                .set_delay(STALL),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .api_key("k")
+        .base_url(server.uri())
+        .max_concurrent_requests(1)
+        .build()
+        .unwrap();
+
+    let busy = tokio::spawn({
+        let client = client.clone();
+        async move { client.models().list().await }
+    });
+    // Wait until the first call holds the only slot and its request reached the server.
+    while received(&server).await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let started = Instant::now();
+    let err = client
+        .models()
+        .list()
+        .total_timeout(Duration::from_millis(100))
+        .await
+        .unwrap_err();
+    assert!(err.is_timeout(), "{err:?}");
+    assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
+    assert_eq!(
+        received(&server).await.len(),
+        1,
+        "the queued call must not be sent"
+    );
+    busy.abort();
+
+    let err = Client::builder()
+        .api_key("k")
+        .max_concurrent_requests(0)
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("max_concurrent_requests"), "{err}");
+}

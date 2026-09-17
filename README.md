@@ -30,6 +30,18 @@ kunobi-jev = "0.1"
 
 Calls run on Tokio.
 
+| Feature | Default | What it does |
+| --- | --- | --- |
+| `rustls` | yes | TLS through rustls |
+| `native-tls` | no | TLS through the platform library (OpenSSL, Secure Transport, SChannel) |
+| `testing` | no | `testing::FakeSystemOne`, a scripted client for tests |
+
+To use the platform TLS library instead of rustls:
+
+```toml
+kunobi-jev = { version = "0.1", default-features = false, features = ["native-tls"] }
+```
+
 ## Quick start
 
 Set `TYPESAFE_API_KEY`, then:
@@ -138,6 +150,7 @@ which take precedence.
 | `default_model` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
 | `timeout` | | 10 s per attempt |
 | `total_timeout` | | none; bounds a whole call, retries included |
+| `max_concurrent_requests` | | none; shared by clones of the client |
 | `retry` | | `RetryPolicy::default()` |
 | `default_header` | | none |
 | `http_client` | | a new `reqwest::Client` |

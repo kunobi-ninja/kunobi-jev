@@ -20,17 +20,22 @@ rustdoc-args = ["--cfg", "docsrs"]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [features]
+default = ["rustls"]
+# TLS backend for the default HTTP client. Pick one; with neither, pass a client
+# through `ClientBuilder::http_client` or https requests will fail.
+rustls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
 # `testing::FakeSystemOne`, a scripted `SystemOne` for tests in code that uses this crate.
 testing = []
 
 [dependencies]
-# HTTP. `rustls` keeps the TLS stack pure Rust; callers can pass their own
-# `reqwest::Client` through `ClientBuilder::http_client`.
-reqwest = { version = "0.13", features = ["rustls"], default-features = false }
+# HTTP. The TLS backend comes from this crate's `rustls` / `native-tls` features;
+# callers can also pass their own `reqwest::Client` through `ClientBuilder::http_client`.
+reqwest = { version = "0.13", default-features = false }
 bytes = "1"
 
 # Async. Only timers are needed: reqwest brings the I/O driver.
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["sync", "time"] }
 
 # Serialization. `indexmap` and `preserve_order` keep question, label and
 # state key order as the caller wrote it, which is the order the model sees.

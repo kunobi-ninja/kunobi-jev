@@ -6,8 +6,16 @@
 //! TYPESAFE_API_KEY=... cargo test --test e2e_api -- --ignored --nocapture
 //! ```
 
-use kunobi_jev::{Client, Entry, Questions, SystemOneRequest, choice, noul, score};
+use kunobi_jev::{Client, Entry, Questions, SystemOneRequest, choice, choice_of, noul, score};
 use serde_json::json;
+
+kunobi_jev::labels! {
+    enum Channel {
+        Payments = "payments": "Payment providers such as Stripe",
+        Email = "email",
+        Other = "other",
+    }
+}
 
 fn client() -> Client {
     Client::new().expect("set TYPESAFE_API_KEY to run the live API tests")
@@ -57,6 +65,10 @@ async fn answers_all_question_types() {
         "is_urgent",
         noul("The message conveys urgency or time-sensitivity"),
     );
+    let channel = questions.add(
+        "channel",
+        choice_of::<Channel>("Which integration is failing?"),
+    );
 
     let state = Entry::try_from(json!({
         "message": "Hi, I've been trying to connect my Stripe account for 3 days and it keeps failing. I'm losing sales. Please help ASAP."
@@ -75,6 +87,8 @@ async fn answers_all_question_types() {
     let frustration = result.answer(&frustration).unwrap();
     assert!((0.0..=2.0).contains(&frustration.score));
     let urgent = result.answer(&urgent).unwrap();
+    let channel = result.answer(&channel).unwrap();
+    assert_eq!(channel.probabilities.len(), 3);
     assert!((0.0..=1.0).contains(&urgent.noul));
     assert!(result.usage.input_tokens > 0);
 

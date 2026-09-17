@@ -3,6 +3,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tracing::Instrument;
 use tracing::field::Empty;
 
@@ -111,6 +112,11 @@ impl Client {
             if attempt > 0 {
                 span.record("http.request.resend_count", attempt);
             }
+            let Ok(slot) =
+                acquire_slot(inner.limiter.as_ref().map(|(slots, _)| slots), deadline).await
+            else {
+                return Err(previous.unwrap_or(Error::Timeout { timeout: total }));
+            };
             let Some(budget) = attempt_budget(req.timeout, deadline) else {
                 return Err(previous.unwrap_or(Error::Timeout { timeout: total }));
             };
@@ -144,6 +150,8 @@ impl Client {
             let outcome = self
                 .attempt(&tag, &url, &req, attempt_headers, timeout)
                 .await;
+            // Free the slot before any backoff so waiting calls can use it.
+            drop(slot);
             let (status, response_headers, body) = match outcome {
                 Ok(response) => response,
                 Err(err) => {
@@ -268,6 +276,26 @@ fn attempt_budget(per_attempt: Duration, deadline: Option<Instant>) -> Option<Du
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     (!remaining.is_zero()).then(|| per_attempt.min(remaining))
+}
+
+/// Wait for a concurrency slot when the client has a limit. `Err` when the total timeout
+/// passes first.
+async fn acquire_slot(
+    limiter: Option<&Semaphore>,
+    deadline: Option<Instant>,
+) -> std::result::Result<Option<SemaphorePermit<'_>>, ()> {
+    let Some(limiter) = limiter else {
+        return Ok(None);
+    };
+    let permit = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline.into(), limiter.acquire())
+            .await
+            .map_err(|_| ())?,
+        None => limiter.acquire().await,
+    };
+    Ok(Some(
+        permit.expect("the concurrency limiter is never closed"),
+    ))
 }
 
 /// Record the response that ends the call. Retried responses are not recorded, so a call

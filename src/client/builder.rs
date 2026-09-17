@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use secrecy::SecretString;
+use tokio::sync::Semaphore;
 
 use super::env::{ENV_API_KEY, ENV_BASE_URL, ENV_DEFAULT_MODEL, read_env};
 use super::{Client, DEFAULT_BASE_URL, DEFAULT_MODEL, Inner};
@@ -30,6 +31,7 @@ pub struct ClientBuilder {
     retry: Option<RetryPolicy>,
     timeout: Option<Duration>,
     total_timeout: Option<Duration>,
+    max_concurrent_requests: Option<usize>,
     default_headers: HeaderMap,
     http_client: Option<reqwest::Client>,
 }
@@ -130,6 +132,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Limit how many attempts this client and its clones send at once. Default: no limit.
+    ///
+    /// Calls over the limit wait for a slot; the wait counts against
+    /// [`total_timeout`](Self::total_timeout) but not the per-attempt timeout. A slot is
+    /// held for one attempt and released during retry backoff.
+    pub fn max_concurrent_requests(mut self, max: usize) -> Self {
+        self.max_concurrent_requests = Some(max);
+        self
+    }
+
     /// Add a header sent with every request. Per-call headers take precedence.
     pub fn default_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.default_headers.insert(name, value);
@@ -193,8 +205,27 @@ impl ClientBuilder {
             ));
         }
 
+        let limiter = match self.max_concurrent_requests {
+            Some(max) if max == 0 || max > Semaphore::MAX_PERMITS => {
+                return Err(Error::Config(format!(
+                    "`max_concurrent_requests` must be between 1 and {}, got {max}.",
+                    Semaphore::MAX_PERMITS
+                )));
+            }
+            Some(max) => Some((Semaphore::new(max), max)),
+            None => None,
+        };
+
         let http = match self.http_client {
             Some(http) => http,
+            None if !TLS_BACKEND && base_url.starts_with("https:") => {
+                return Err(Error::Config(
+                    "kunobi-jev was built without a TLS backend, so it cannot reach an https \
+                     `base_url`. Enable the `rustls` or `native-tls` feature, or pass a client \
+                     through `ClientBuilder::http_client`."
+                        .into(),
+                ));
+            }
             None => reqwest::Client::builder()
                 .build()
                 .map_err(|err| Error::Config(format!("Could not create the HTTP client: {err}")))?,
@@ -209,6 +240,7 @@ impl ClientBuilder {
                 retry,
                 timeout,
                 total_timeout: self.total_timeout,
+                limiter,
                 default_headers: self.default_headers,
                 http,
                 request_count: AtomicU64::new(0),
@@ -216,6 +248,9 @@ impl ClientBuilder {
         })
     }
 }
+
+/// Whether the default HTTP client can speak TLS.
+const TLS_BACKEND: bool = cfg!(any(feature = "rustls", feature = "native-tls"));
 
 /// Require https, allowing plain http only for loopback hosts or when explicitly allowed.
 fn validate_base_url(base_url: &str, allow_insecure_http: bool) -> Result<()> {
@@ -266,6 +301,7 @@ impl fmt::Debug for ClientBuilder {
             .field("retry", &self.retry)
             .field("timeout", &self.timeout)
             .field("total_timeout", &self.total_timeout)
+            .field("max_concurrent_requests", &self.max_concurrent_requests)
             .finish_non_exhaustive()
     }
 }
@@ -284,6 +320,12 @@ mod tests {
         move |name| non_blank(map.get(name).cloned())
     }
 
+    /// A builder that works in every feature set: with no TLS backend compiled in, the
+    /// default client refuses https, which is not what these tests are about.
+    fn builder() -> ClientBuilder {
+        ClientBuilder::default().http_client(reqwest::Client::new())
+    }
+
     async fn authorization(client: &Client) -> String {
         client
             .inner
@@ -298,13 +340,11 @@ mod tests {
 
     #[test]
     fn requires_credentials() {
-        let err = ClientBuilder::default()
-            .build_with_env(env(&[]))
-            .unwrap_err();
+        let err = builder().build_with_env(env(&[])).unwrap_err();
         assert!(err.to_string().contains(ENV_API_KEY), "{err}");
-        let blank_env = ClientBuilder::default().build_with_env(env(&[(ENV_API_KEY, "  ")]));
+        let blank_env = builder().build_with_env(env(&[(ENV_API_KEY, "  ")]));
         assert!(blank_env.is_err());
-        let blank_code = ClientBuilder::default()
+        let blank_code = builder()
             .api_key(" ")
             .build_with_env(env(&[(ENV_API_KEY, "k")]));
         assert_eq!(blank_code.unwrap_err().to_string(), "The API key is blank.");
@@ -312,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn falls_back_to_environment_then_defaults() {
-        let client = ClientBuilder::default()
+        let client = builder()
             .build_with_env(env(&[(ENV_API_KEY, " k ")]))
             .unwrap();
         assert_eq!(client.base_url(), DEFAULT_BASE_URL);
@@ -322,7 +362,7 @@ mod tests {
         assert_eq!(authorization(&client).await, "Bearer k");
         assert!(!client.inner.log_bodies);
 
-        let from_env = ClientBuilder::default()
+        let from_env = builder()
             .build_with_env(env(&[
                 (ENV_API_KEY, "k"),
                 (ENV_BASE_URL, "http://localhost:8080//"),
@@ -335,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn code_takes_precedence_over_environment() {
-        let client = ClientBuilder::default()
+        let client = builder()
             .api_key("from-code")
             .base_url("https://example.com/")
             .default_model("jev-code")
@@ -352,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_replaces_api_keys_from_code_and_environment() {
-        let client = ClientBuilder::default()
+        let client = builder()
             .api_key("from-code")
             .credentials_fn(|| async { Ok::<_, BoxError>("from-provider") })
             .build_with_env(env(&[(ENV_API_KEY, "from-env")]))
@@ -361,9 +401,26 @@ mod tests {
     }
 
     #[test]
+    fn https_needs_a_tls_backend_or_a_custom_client() {
+        let default_client = ClientBuilder::default()
+            .api_key("k")
+            .build_with_env(env(&[]));
+        assert_eq!(default_client.is_ok(), TLS_BACKEND);
+        if !TLS_BACKEND {
+            let err = default_client.unwrap_err();
+            assert!(err.to_string().contains("without a TLS backend"), "{err}");
+        }
+        let custom = ClientBuilder::default()
+            .api_key("k")
+            .http_client(reqwest::Client::new())
+            .build_with_env(env(&[]));
+        assert!(custom.is_ok());
+    }
+
+    #[test]
     fn plain_http_is_limited_to_loopback_hosts() {
         let build = |url: &str, allow: bool| {
-            ClientBuilder::default()
+            builder()
                 .api_key("k")
                 .base_url(url)
                 .allow_insecure_http(allow)
@@ -396,7 +453,7 @@ mod tests {
 
     #[test]
     fn plain_http_from_the_environment_is_refused_too() {
-        let err = ClientBuilder::default()
+        let err = builder()
             .build_with_env(env(&[
                 (ENV_API_KEY, "k"),
                 (ENV_BASE_URL, "http://attacker.example"),
@@ -408,15 +465,15 @@ mod tests {
     #[test]
     fn rejects_invalid_configuration() {
         let build = |builder: ClientBuilder| builder.api_key("k").build_with_env(env(&[]));
-        let err = build(ClientBuilder::default().timeout(Duration::ZERO)).unwrap_err();
+        let err = build(builder().timeout(Duration::ZERO)).unwrap_err();
         assert!(err.to_string().contains("timeout"));
-        let err = build(ClientBuilder::default().retry(RetryPolicy {
+        let err = build(builder().retry(RetryPolicy {
             backoff_jitter: 2.0,
             ..RetryPolicy::default()
         }))
         .unwrap_err();
         assert!(err.to_string().contains("retry.backoff_jitter"));
-        let err = ClientBuilder::default()
+        let err = builder()
             .api_key("bad\nkey")
             .build_with_env(env(&[]))
             .unwrap_err();
@@ -429,7 +486,7 @@ mod tests {
 
     #[test]
     fn debug_output_hides_credentials() {
-        let builder = ClientBuilder::default().api_key("sk-secret");
+        let builder = builder().api_key("sk-secret");
         assert!(!format!("{builder:?}").contains("sk-secret"));
         let client = builder.build_with_env(env(&[])).unwrap();
         assert!(!format!("{client:?}").contains("sk-secret"));

@@ -1,11 +1,24 @@
 //! Run with `cargo run --example demo`. Needs TYPESAFE_API_KEY in the environment.
 
-use kunobi_jev::{Client, Entry, Error, Questions, SystemOneRequest, choice_labels, noul, score};
+use std::time::Duration;
+
+use kunobi_jev::{Client, Entry, Error, Questions, SystemOneRequest, choice_of, noul, score};
 use serde_json::json;
+
+kunobi_jev::labels! {
+    /// The customer's tone.
+    pub enum Tone {
+        Calm = "calm",
+        Frustrated = "frustrated": "Annoyed but civil",
+        Angry = "angry": "Strong language or threats",
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let client = Client::new()?;
+    let client = Client::builder()
+        .total_timeout(Duration::from_secs(15))
+        .build()?;
 
     let models = client.models().list().await?;
     let names: Vec<_> = models.iter().map(|m| m.name.as_str()).collect();
@@ -18,25 +31,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mut questions = Questions::new();
     let is_billing = questions.add("isBilling", noul("Is this ticket about billing?"));
-    let sentiment = questions.add(
-        "sentiment",
-        choice_labels(
-            "What is the customer's tone?",
-            ["calm", "frustrated", "angry"],
-        ),
-    );
+    let tone = questions.add("tone", choice_of::<Tone>("What is the customer's tone?"));
     let urgency = questions.add(
         "urgency",
         score(
             "How urgent is this ticket?",
             ["can wait", "this week", "today", "right now"],
-        ),
-    );
-    let refund_risk = questions.add(
-        "refundRisk",
-        score(
-            "How likely is the customer to demand a refund?",
-            ["unlikely", "possible", "likely"],
         ),
     );
 
@@ -57,22 +57,21 @@ async fn main() -> anyhow::Result<()> {
         Err(err) => return Err(err.into()),
     };
 
-    let sentiment = result.answer(&sentiment)?;
+    let tone = result.answer(&tone)?;
+    match tone.decide(0.6) {
+        Some(Tone::Angry) => println!("tone         angry: escalate"),
+        Some(label) => println!("tone         {label:?}"),
+        None => println!(
+            "tone         unclear ({:.2} confidence): {:?}",
+            tone.confidence, tone.probabilities
+        ),
+    }
+    println!("billing?     {}", result.answer(&is_billing)?.is_yes(0.7));
     let urgency = result.answer(&urgency)?;
-    let refund_risk = result.answer(&refund_risk)?;
-    println!("billing?     {:.2}", result.answer(&is_billing)?.noul);
     println!(
-        "tone         {} ({:.2})",
-        sentiment.choice,
-        sentiment.probability(&sentiment.choice).unwrap_or_default()
-    );
-    println!(
-        "urgency      {:.2} on a 0-3 scale: {:?}",
-        urgency.score, urgency.legend
-    );
-    println!(
-        "refund risk  {:.2} ({:.2} confidence)",
-        refund_risk.score, refund_risk.confidence
+        "urgency      {:.2} on a 0-3 scale, most likely level {:?}",
+        urgency.score,
+        urgency.most_likely_level()
     );
     println!(
         "tokens       {} in / {} out",

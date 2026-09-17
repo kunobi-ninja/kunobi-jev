@@ -46,6 +46,8 @@ struct Inner {
     retry: RetryPolicy,
     timeout: Duration,
     total_timeout: Option<Duration>,
+    /// Concurrency slots and the configured limit.
+    limiter: Option<(tokio::sync::Semaphore, usize)>,
     default_headers: HeaderMap,
     http: reqwest::Client,
     /// Numbers requests so concurrent calls, and the attempts within one, can be told apart in logs.
@@ -90,6 +92,11 @@ impl Client {
     /// Upper bound for a whole call, for calls that do not override it.
     pub fn total_timeout(&self) -> Option<Duration> {
         self.inner.total_timeout
+    }
+
+    /// The concurrency limit shared by this client and its clones, if any.
+    pub fn max_concurrent_requests(&self) -> Option<usize> {
+        self.inner.limiter.as_ref().map(|(_, max)| *max)
     }
 
     /// Headers sent with every request.
@@ -140,6 +147,7 @@ impl fmt::Debug for Client {
             .field("retry", &self.inner.retry)
             .field("timeout", &self.inner.timeout)
             .field("total_timeout", &self.inner.total_timeout)
+            .field("max_concurrent_requests", &self.max_concurrent_requests())
             .field("credentials", &self.inner.credentials)
             .field("log_bodies", &self.inner.log_bodies)
             .finish_non_exhaustive()

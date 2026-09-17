@@ -39,6 +39,7 @@
 //! Authenticate with an API key, or with a [`CredentialProvider`] when the client
 //! runs on user machines and must not hold a TypeSafe key. See [`credentials`].
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -52,6 +53,7 @@ pub mod request;
 pub mod retry;
 pub mod system_one;
 #[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub mod testing;
 pub mod types;
 

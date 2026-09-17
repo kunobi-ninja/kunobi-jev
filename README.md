@@ -1,0 +1,203 @@
+# kunobi-jev
+
+[![CI](https://github.com/kunobi-ninja/kunobi-jev/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunobi-ninja/kunobi-jev/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](Cargo.toml)
+
+Rust client for the [TypeSafe](https://docs.typesafe.ai) System One API. You send
+state and typed questions to Jev, TypeSafe's decision model, and get answers your
+code can act on: a label, a score or a probability, each with the numbers behind it.
+
+Jev has three question types:
+
+| Builder | Asks | Answer |
+| --- | --- | --- |
+| `noul` | a yes/no question | `noul`: probability of yes |
+| `choice` / `choice_labels` | which label fits | `choice`, `confidence`, `probabilities` per label |
+| `score` | where it falls on ordered levels | expected `score`, `confidence`, `legend`, `probabilities` |
+
+All questions in one call are answered against the same state in a single request.
+
+## Install
+
+```toml
+kunobi-jev = { git = "https://github.com/kunobi-ninja/kunobi-jev", tag = "v0.1.0" }
+```
+
+Calls run on Tokio.
+
+## Quick start
+
+Set `TYPESAFE_API_KEY`, then:
+
+```rust
+use kunobi_jev::{Client, Entry, Questions, SystemOneRequest, choice, noul, score};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new()?;
+
+    let mut questions = Questions::new();
+    let department = questions.add(
+        "department",
+        choice("Which team should handle this?", [
+            ("billing", "Payment or subscription issues"),
+            ("technical", "Bugs or integration problems"),
+            ("sales", "Pricing or account questions"),
+        ]),
+    );
+    let frustration = questions.add(
+        "frustration",
+        score("How frustrated is the customer?", ["calm", "frustrated but civil", "very angry"]),
+    );
+    let urgent = questions.add("urgent", noul("Does the message convey urgency?"));
+
+    let ticket = Entry::try_from(json!({
+        "subject": "Stripe connection failing",
+        "body": "It keeps failing for 3 days and I'm losing sales. Please help ASAP."
+    }))?;
+    let result = client.system_one(SystemOneRequest::new(ticket, questions)).await?;
+
+    let department = result.answer(&department)?;
+    if department.confidence >= 0.5 {
+        println!("route to {}", department.choice);
+    } else {
+        println!("send to a human: {:?}", department.probabilities);
+    }
+    println!("frustration {:.2}", result.answer(&frustration)?.score);
+    println!("urgent {:.2}", result.answer(&urgent)?.noul);
+    Ok(())
+}
+```
+
+`Questions::add` returns an `AnswerKey`, so `result.answer(&key)` hands back the
+answer type that matches the question. `result.answers` holds every answer by name
+if you need to walk them.
+
+State and descriptions are an `Entry`: text, a JSON object, a JSON array, or null.
+Use `Entry::from_serialize(&value)` for your own structs. Object key order is kept.
+
+## Configuration
+
+`Client::new()` reads the environment. `Client::builder()` sets values in code,
+which take precedence.
+
+| Builder method | Environment | Default |
+| --- | --- | --- |
+| `api_key` or `credential_provider` | `TYPESAFE_API_KEY` | required |
+| `base_url` | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai`; must be https |
+| `default_model` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
+| `timeout` | | 10 s per attempt |
+| `retry` | | `RetryPolicy::default()` |
+| `default_header` | | none |
+| `http_client` | | a new `reqwest::Client` |
+| `log_bodies` | | off |
+| `allow_insecure_http` | | off |
+
+Per call, you can override the timeout, the retry policy and headers:
+
+```rust
+let models = client
+    .models()
+    .list()
+    .timeout(Duration::from_secs(2))
+    .max_retries(0)
+    .with_response()
+    .await?;
+println!("request {:?}", models.request_id);
+```
+
+Nothing is sent until the call is awaited. Dropping the future cancels the request
+and any pending retry, so wrap it in `tokio::time::timeout` or `select!` to bound
+the total time.
+
+## Credentials
+
+**Servers and CLIs** can use a TypeSafe API key from the environment or from your
+secret store:
+
+```rust
+let key: String = read_from_vault()?;
+let client = Client::builder().api_key(key).build()?;
+```
+
+**Apps that run on user machines must not ship a TypeSafe API key.** Anyone with the
+binary can extract it. Route calls through your own backend, which holds the key,
+and authenticate to it with a short-lived user token. A credential provider is asked
+for a token before every attempt, so refreshed tokens are picked up on retries:
+
+```rust,ignore
+let auth = Arc::new(kunobi_auth::client::AuthClient::new(config)?);
+let client = Client::builder()
+    .base_url("https://jev.kunobi.example")
+    .credentials_fn(move || {
+        let auth = auth.clone();
+        async move { auth.token().await }
+    })
+    .build()?;
+```
+
+Implement `CredentialProvider` directly when a closure isn't enough. The client does
+not cache tokens; the provider should. A provider that fails or takes longer than
+the per-attempt timeout fails the call with `Error::Credentials`, which is not
+retried and never includes the token.
+
+What the client does with credentials:
+
+- Sends them only in the `Authorization` header, marked sensitive, over https.
+  Plain `http://` is refused except for loopback hosts, including when it comes
+  from `TYPESAFE_BASE_URL`. `allow_insecure_http(true)` lifts that for trusted
+  private networks.
+- Holds an API key as a `SecretString`, wiped on drop. The header value built for
+  each request is a separate copy owned by the HTTP stack and is not wiped.
+- Drops `Authorization` when a redirect leaves the original scheme, host or port.
+- Never prints credentials: `Debug` shows `***`, and logs show only the scheme and
+  the last four characters.
+- Ignores `Authorization` set through default or per-call headers.
+
+Environment variables are visible to child processes and to other processes of the
+same user, so prefer a secret store or a provider for anything beyond local
+development.
+
+## Retries and errors
+
+By default a call retries twice on 408, 429 and 5xx responses, connection errors
+and timeouts. Backoff starts at 500 ms, doubles up to 5 s, and subtracts up to 25%
+jitter. A `retry-after-ms` or `Retry-After` header of up to 60 s replaces the
+backoff. Each retry sends `X-TypeSafe-Retry-Count`.
+
+Errors are one `kunobi_jev::Error` enum:
+
+- `Api`: a non-2xx response. `ApiError` carries the status, `kind()`, the parsed body,
+  the request ID and `retry_after()`.
+- `Connection` and `Timeout`: the request failed in transit. `is_connection()` is true for both.
+- `InvalidRequest` and `Config`: rejected before sending, such as an empty question
+  set, a score with fewer than two levels, a missing API key, or a plain-http URL.
+- `Credentials`: the credential provider failed, timed out, or returned an unusable token.
+- `Decode`: a 2xx body with an unexpected shape.
+- `MissingAnswer`: `result.answer(&key)` found no answer of that type under that name.
+
+## Logging
+
+Requests log through `tracing`. Each attempt logs a summary at `info`, such as
+`#3 POST /v1/systemone <- 200 in 212ms (request req_…)`, and redacted headers at
+`debug`. Request and response bodies are not logged unless you call
+`log_bodies(true)`: they contain the state you send, which may include personal data.
+
+## Development
+
+```sh
+mise install
+cargo test
+cargo clippy --all-targets -- -D warnings
+mise run deny
+TYPESAFE_API_KEY=... mise run e2e      # live API tests
+cargo run --example demo               # needs TYPESAFE_API_KEY
+cd fuzz && cargo +nightly fuzz run parse_error_body
+```
+
+## License
+
+Apache-2.0. This crate ports the [TypeSafe JavaScript SDK](https://github.com/typesafe-ai/typesafe-sdk-js)
+(MIT); see [NOTICE](NOTICE).

@@ -1,0 +1,14 @@
+/target
+
+# cargo-mutants working directories
+/mutants.out
+/mutants.out.old
+
+# Coverage reports
+/coverage
+
+# cargo-fuzz output (corpus + crashes are regenerated; target/ is build output)
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

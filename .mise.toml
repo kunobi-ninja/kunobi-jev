@@ -1,0 +1,42 @@
+# Toolchain pinning for local development and CI.
+#
+# Local: install mise, then run `mise install` in this directory to provision
+# everything below. CI installs the same versions from this file.
+
+[tools]
+# Match the CI image (`rust:1.94-bookworm`) for reproducibility.
+rust = "1.94.1"
+
+# Static-analysis CLI used by `.github/workflows/ci.yml`.
+"aqua:EmbarkStudios/cargo-deny" = "0.19.4"
+
+# Mutation testing. Local-only: run with `mise run mutants`.
+"cargo:cargo-mutants" = "25.3.1"
+
+[env]
+# Honour the version above, even if a global rustup override is set.
+RUSTUP_TOOLCHAIN = "1.94.1"
+
+[tasks.mutants]
+description = "Run cargo-mutants to surface untested code-mutation survivors. Mutates a working copy, not your source tree (safe to interrupt)."
+run = "cargo mutants --no-times --timeout-multiplier 2 -- --all-features"
+
+[tasks."mutants:file"]
+description = "Run mutants on a single file (e.g. mise run mutants:file -- src/retry.rs)"
+run = "cargo mutants --no-times --timeout-multiplier 2 -- --all-features --file"
+
+[tasks.coverage]
+description = "Run Rust test coverage with cargo-tarpaulin."
+run = "cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage"
+
+[tasks."coverage:html"]
+description = "Run Rust test coverage and render an HTML report."
+run = "cargo tarpaulin --engine llvm --all-features --workspace --out Html --output-dir coverage"
+
+[tasks.deny]
+description = "Run cargo-deny policy checks."
+run = "cargo deny check"
+
+[tasks.e2e]
+description = "Run the live API tests (needs TYPESAFE_API_KEY)."
+run = "cargo test --test e2e_api -- --ignored --nocapture"

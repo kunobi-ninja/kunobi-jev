@@ -1,0 +1,330 @@
+//! Retry policy, delay calculation and `Retry-After` parsing.
+
+use std::collections::BTreeSet;
+use std::time::{Duration, SystemTime};
+
+use reqwest::header::HeaderMap;
+
+use crate::error::{Error, Result};
+
+/// Default timeout per attempt.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// When and how to retry a failed attempt.
+///
+/// To change one field, start from an existing policy:
+///
+/// ```
+/// use kunobi_jev::RetryPolicy;
+///
+/// let policy = RetryPolicy { max_retries: 5, ..RetryPolicy::default() };
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetryPolicy {
+    /// Retries after the initial attempt; `0` disables retries. Default: 2.
+    pub max_retries: u32,
+    /// First backoff delay, doubled on each retry up to `backoff_max`. Default: 500 ms.
+    pub backoff_initial: Duration,
+    /// Longest backoff delay. Default: 5 s.
+    pub backoff_max: Duration,
+    /// Fraction of each backoff delay randomly subtracted, from 0 to 1. Default: 0.25.
+    pub backoff_jitter: f64,
+    /// HTTP statuses to retry. Default: 408, 429 and 500–599.
+    pub http_statuses: BTreeSet<u16>,
+    /// Honor `retry-after-ms` and `Retry-After` up to `max_retry_after`. Default: true.
+    pub respect_retry_after: bool,
+    /// Longest server delay to honor; longer ones fall back to backoff. Default: 60 s.
+    pub max_retry_after: Duration,
+    /// Retry connection failures, including interrupted response bodies. Default: true.
+    pub retry_connection_errors: bool,
+    /// Retry attempts that timed out. Default: true.
+    pub retry_timeouts: bool,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            backoff_initial: Duration::from_millis(500),
+            backoff_max: Duration::from_secs(5),
+            backoff_jitter: 0.25,
+            http_statuses: [408, 429].into_iter().chain(500..600).collect(),
+            respect_retry_after: true,
+            max_retry_after: Duration::from_secs(60),
+            retry_connection_errors: true,
+            retry_timeouts: true,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// The default policy with retries disabled.
+    pub fn none() -> Self {
+        Self {
+            max_retries: 0,
+            ..Self::default()
+        }
+    }
+
+    /// Reject a jitter outside 0..=1 and statuses outside 100..=999.
+    pub fn validate(&self) -> Result<()> {
+        if !(0.0..=1.0).contains(&self.backoff_jitter) {
+            return Err(Error::Config(format!(
+                "`retry.backoff_jitter` must be between 0 and 1, got {}.",
+                self.backoff_jitter
+            )));
+        }
+        if let Some(status) = self
+            .http_statuses
+            .iter()
+            .find(|status| !(100..=999).contains(*status))
+        {
+            return Err(Error::Config(format!(
+                "`retry.http_statuses` must contain HTTP status codes, got {status}."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether this policy retries an HTTP status.
+    pub fn is_retryable_status(&self, status: u16) -> bool {
+        self.http_statuses.contains(&status)
+    }
+
+    /// Whether this policy retries a transport error.
+    pub(crate) fn is_retryable_error(&self, err: &Error) -> bool {
+        match err {
+            Error::Timeout { .. } => self.retry_timeouts,
+            Error::Connection { .. } => self.retry_connection_errors,
+            _ => false,
+        }
+    }
+
+    /// The wait before retrying zero-based `attempt`.
+    ///
+    /// Uses an allowed server delay from `headers`; otherwise capped
+    /// exponential backoff, reduced by `random * backoff_jitter`.
+    /// `random` is expected in `0.0..=1.0`.
+    pub fn delay(&self, attempt: u32, headers: Option<&HeaderMap>, random: f64) -> Duration {
+        if self.respect_retry_after
+            && let Some(headers) = headers
+            && let Some(server) = parse_retry_after(headers, SystemTime::now())
+            && server <= self.max_retry_after
+        {
+            return server;
+        }
+        let factor = 2u32.checked_pow(attempt).unwrap_or(u32::MAX);
+        let exponential = self
+            .backoff_initial
+            .saturating_mul(factor)
+            .min(self.backoff_max);
+        let keep = (1.0 - random.clamp(0.0, 1.0) * self.backoff_jitter).clamp(0.0, 1.0);
+        exponential.mul_f64(keep)
+    }
+}
+
+/// Parse `retry-after-ms` or `Retry-After`, preferring `retry-after-ms`.
+///
+/// `Retry-After` may hold seconds or an HTTP date; a date in the past yields
+/// zero. Returns `None` when neither header holds a valid delay.
+pub fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    if let Some(ms) = header_str(headers, "retry-after-ms").and_then(parse_non_negative)
+        && let Ok(delay) = Duration::try_from_secs_f64(ms / 1000.0)
+    {
+        return Some(delay);
+    }
+    let raw = header_str(headers, "retry-after")?;
+    if let Ok(seconds) = raw.parse::<f64>() {
+        return (seconds.is_finite() && seconds >= 0.0)
+            .then(|| Duration::try_from_secs_f64(seconds).ok())
+            .flatten();
+    }
+    let date = httpdate::parse_http_date(raw).ok()?;
+    Some(date.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+}
+
+fn parse_non_negative(raw: &str) -> Option<f64> {
+    raw.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::HeaderValue;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, HeaderValue::from_str(value).unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn default_policy_matches_the_documented_values() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.max_retries, 2);
+        assert!(policy.is_retryable_status(408));
+        assert!(policy.is_retryable_status(429));
+        assert!(policy.is_retryable_status(500));
+        assert!(policy.is_retryable_status(599));
+        assert!(!policy.is_retryable_status(600));
+        assert!(!policy.is_retryable_status(409));
+        assert_eq!(policy.http_statuses.len(), 102);
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        let policy = RetryPolicy::default();
+        let ms = |attempt| policy.delay(attempt, None, 0.0).as_millis();
+        assert_eq!(
+            [ms(0), ms(1), ms(2), ms(3), ms(4)],
+            [500, 1000, 2000, 4000, 5000]
+        );
+        assert_eq!(ms(40), 5000);
+        assert_eq!(ms(u32::MAX), 5000);
+    }
+
+    #[test]
+    fn jitter_subtracts_at_most_the_configured_fraction() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.delay(0, None, 1.0), Duration::from_millis(375));
+        assert_eq!(policy.delay(0, None, 0.5), Duration::from_micros(437_500));
+    }
+
+    #[test]
+    fn honors_retry_after_within_the_cap() {
+        let policy = RetryPolicy::default();
+        let server = headers(&[("retry-after", "2")]);
+        assert_eq!(policy.delay(0, Some(&server), 1.0), Duration::from_secs(2));
+
+        let ignoring = RetryPolicy {
+            respect_retry_after: false,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(
+            ignoring.delay(0, Some(&server), 0.0),
+            Duration::from_millis(500)
+        );
+
+        let capped = RetryPolicy {
+            max_retry_after: Duration::from_secs(1),
+            ..RetryPolicy::default()
+        };
+        assert_eq!(
+            capped.delay(0, Some(&server), 0.0),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn parses_retry_after_forms() {
+        let now = SystemTime::now();
+        let parse = |pairs: &[(&'static str, &str)]| parse_retry_after(&headers(pairs), now);
+        assert_eq!(
+            parse(&[("retry-after-ms", "250")]),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            parse(&[("retry-after-ms", "1.5")]),
+            Some(Duration::from_micros(1500))
+        );
+        assert_eq!(parse(&[("retry-after", "3")]), Some(Duration::from_secs(3)));
+        assert_eq!(
+            parse(&[("retry-after", " 0.5 ")]),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse(&[("retry-after-ms", "100"), ("retry-after", "9")]),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            parse(&[("retry-after-ms", "-1"), ("retry-after", "9")]),
+            Some(Duration::from_secs(9))
+        );
+        assert_eq!(parse(&[("retry-after", "-3")]), None);
+        assert_eq!(parse(&[("retry-after", "inf")]), None);
+        assert_eq!(parse(&[("retry-after", "soon")]), None);
+        assert_eq!(parse(&[]), None);
+    }
+
+    #[test]
+    fn parses_http_dates_relative_to_now() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let later = httpdate::fmt_http_date(now + Duration::from_secs(30));
+        let earlier = httpdate::fmt_http_date(now - Duration::from_secs(30));
+        assert_eq!(
+            parse_retry_after(&headers(&[("retry-after", &later)]), now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after(&headers(&[("retry-after", &earlier)]), now),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn validation_names_the_bad_field() {
+        let bad = |policy: RetryPolicy| policy.validate().unwrap_err().to_string();
+        assert!(
+            bad(RetryPolicy {
+                backoff_jitter: 1.5,
+                ..RetryPolicy::default()
+            })
+            .contains("retry.backoff_jitter")
+        );
+        assert!(
+            bad(RetryPolicy {
+                backoff_jitter: -0.1,
+                ..RetryPolicy::default()
+            })
+            .contains("retry.backoff_jitter")
+        );
+        assert!(
+            bad(RetryPolicy {
+                backoff_jitter: f64::NAN,
+                ..RetryPolicy::default()
+            })
+            .contains("retry.backoff_jitter")
+        );
+        assert!(
+            bad(RetryPolicy {
+                http_statuses: [503, 42].into(),
+                ..RetryPolicy::default()
+            })
+            .contains("retry.http_statuses")
+        );
+        assert!(
+            RetryPolicy {
+                backoff_jitter: 1.0,
+                ..RetryPolicy::none()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn retryable_errors_follow_the_policy_flags() {
+        let timeout = Error::Timeout {
+            timeout: Duration::from_secs(1),
+        };
+        let policy = RetryPolicy {
+            retry_timeouts: false,
+            ..RetryPolicy::default()
+        };
+        assert!(!policy.is_retryable_error(&timeout));
+        assert!(RetryPolicy::default().is_retryable_error(&timeout));
+        assert!(!RetryPolicy::default().is_retryable_error(&Error::Config("x".into())));
+    }
+}

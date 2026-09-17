@@ -1,0 +1,50 @@
+[package]
+name = "kunobi-jev"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "Rust client for the TypeSafe System One API (Jev): typed Choice, Score and Noul questions with retries and timeouts"
+repository = "https://github.com/kunobi-ninja/kunobi-jev"
+readme = "README.md"
+keywords = ["typesafe", "jev", "classification", "ai", "api-client"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+[dependencies]
+# HTTP. `rustls` keeps the TLS stack pure Rust; callers can pass their own
+# `reqwest::Client` through `ClientBuilder::http_client`.
+reqwest = { version = "0.13", features = ["rustls"], default-features = false }
+bytes = "1"
+
+# Async. Only timers are needed: reqwest brings the I/O driver.
+tokio = { version = "1", features = ["time"] }
+
+# Serialization. `indexmap` and `preserve_order` keep question, label and
+# state key order as the caller wrote it, which is the order the model sees.
+# Without `preserve_order`, any object passing through `serde_json::Value`
+# (state built with `json!`, answers read back) comes out sorted by key.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+
+# Retry-After HTTP dates and backoff jitter.
+httpdate = "1"
+fastrand = "2"
+
+# Credentials: keys and formatted headers are wiped from memory on drop.
+secrecy = "0.10"
+zeroize = "1"
+
+# Errors
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+wiremock = "0.6"
+# Property-based testing for parsers + boundaries.
+proptest = "1.5"
+anyhow = "1"

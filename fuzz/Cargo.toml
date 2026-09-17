@@ -1,0 +1,45 @@
+# Standalone fuzz crate. Lives outside the parent workspace so it doesn't
+# couple the parent's MSRV to nightly Rust (cargo-fuzz requires nightly).
+#
+# Run a target:
+#   cd fuzz && cargo +nightly fuzz run parse_error_body
+#
+# Crashes land in fuzz/artifacts/<target>/.
+
+[package]
+name = "kunobi-jev-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kunobi-jev = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "parse_error_body"
+path = "fuzz_targets/parse_error_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_system_one_result"
+path = "fuzz_targets/parse_system_one_result.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_retry_after"
+path = "fuzz_targets/parse_retry_after.rs"
+test = false
+doc = false
+bench = false
+
+# Workspace stanza tells Cargo this crate is its own root.
+[workspace]

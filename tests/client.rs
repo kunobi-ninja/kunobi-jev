@@ -640,13 +640,17 @@ async fn the_client_implements_system_one() {
 
 #[tokio::test]
 async fn a_retry_cut_short_by_the_total_timeout_reports_the_earlier_error() {
+    // The budget leaves ample room for the 60 ms backoff even when the first attempt is
+    // slow, so the retry always starts; the stalled second response then outlasts it.
+    let budget = Duration::from_secs(1);
+    let stall = Duration::from_secs(6);
     let server = MockServer::start().await;
     Mock::given(path("/v1/models"))
         .respond_with(sequence(vec![
             ResponseTemplate::new(503).insert_header("retry-after-ms", "60"),
             ResponseTemplate::new(200)
                 .set_body_json(models_body())
-                .set_delay(STALL),
+                .set_delay(stall),
         ]))
         .mount(&server)
         .await;
@@ -655,7 +659,7 @@ async fn a_retry_cut_short_by_the_total_timeout_reports_the_earlier_error() {
     let err = client(&server)
         .models()
         .list()
-        .total_timeout(Duration::from_millis(150))
+        .total_timeout(budget)
         .await
         .unwrap_err();
     assert_eq!(
@@ -663,7 +667,7 @@ async fn a_retry_cut_short_by_the_total_timeout_reports_the_earlier_error() {
         Some(StatusCode::SERVICE_UNAVAILABLE),
         "{err:?}"
     );
-    assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
+    assert!(started.elapsed() < stall / 2, "{:?}", started.elapsed());
     assert_eq!(received(&server).await.len(), 2);
 }
 

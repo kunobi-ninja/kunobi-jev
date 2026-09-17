@@ -14,6 +14,9 @@ pub type AskFuture<'a> = Pin<Box<dyn Future<Output = Result<SystemOneResult>> + 
 
 /// Answers a [`SystemOneRequest`].
 ///
+/// The trait carries only the request. Per-call options such as timeouts and retries
+/// belong to the implementation: configure them on the [`Client`] you pass in.
+///
 /// Take `&dyn SystemOne` or `impl SystemOne` in product code instead of [`Client`],
 /// and pass a fake in tests; see [`FakeSystemOne`](crate::testing::FakeSystemOne)
 /// behind the `testing` feature.
@@ -42,6 +45,12 @@ impl SystemOne for Client {
 }
 
 impl<T: SystemOne + ?Sized> SystemOne for Arc<T> {
+    fn ask(&self, request: SystemOneRequest) -> AskFuture<'_> {
+        (**self).ask(request)
+    }
+}
+
+impl<T: SystemOne + ?Sized> SystemOne for Box<T> {
     fn ask(&self, request: SystemOneRequest) -> AskFuture<'_> {
         (**self).ask(request)
     }

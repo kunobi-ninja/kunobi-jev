@@ -119,10 +119,11 @@ impl<T> Call<T> {
         self
     }
 
-    /// Upper bound for the whole call, including retries and backoff.
+    /// Upper bound for the whole call, including credentials, retries and backoff.
     ///
-    /// Attempts are shortened to fit, and a retry whose backoff would end past the
-    /// bound is not started: the last error is returned instead.
+    /// Attempts are shortened to fit the time left. A retry is skipped when its backoff
+    /// would end past the bound, and a retry cut short by the bound returns the
+    /// previous attempt's error, such as the 503 that caused the retry.
     pub fn total_timeout(mut self, total_timeout: Duration) -> Self {
         self.total_timeout = Some(total_timeout);
         self

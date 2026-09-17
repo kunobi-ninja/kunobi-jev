@@ -12,6 +12,11 @@ use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+/// How long a mock server stalls when a test checks that the client gives up first.
+/// Timing assertions compare against this, not against the client's own timeouts, so
+/// a slow CI runner can't fail a client that behaves correctly.
+const STALL: Duration = Duration::from_secs(3);
+
 /// A retry policy with millisecond backoff and no jitter, so tests stay fast and deterministic.
 fn fast_retry() -> RetryPolicy {
     RetryPolicy {
@@ -406,7 +411,7 @@ async fn timeouts_apply_per_attempt_and_retry() {
 async fn timeouts_surface_as_timeout_errors() {
     let server = MockServer::start().await;
     Mock::given(path("/v1/models"))
-        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+        .respond_with(ResponseTemplate::new(200).set_delay(STALL))
         .mount(&server)
         .await;
 
@@ -424,7 +429,7 @@ async fn timeouts_surface_as_timeout_errors() {
     assert!(err.is_timeout());
     assert!(err.is_connection());
     assert_eq!(err.to_string(), "Request timed out after 50ms.");
-    assert!(started.elapsed() < Duration::from_millis(450));
+    assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
     assert_eq!(received(&server).await.len(), 1);
 }
 
@@ -557,7 +562,7 @@ async fn requests_can_override_the_model_and_forward_extra_fields() {
 async fn total_timeout_skips_a_retry_that_cannot_finish() {
     let server = MockServer::start().await;
     Mock::given(path("/v1/models"))
-        .respond_with(ResponseTemplate::new(503).insert_header("retry-after-ms", "400"))
+        .respond_with(ResponseTemplate::new(503).insert_header("retry-after-ms", "3000"))
         .mount(&server)
         .await;
 
@@ -569,11 +574,8 @@ async fn total_timeout_skips_a_retry_that_cannot_finish() {
         .await
         .unwrap_err();
     assert_eq!(err.status(), Some(StatusCode::SERVICE_UNAVAILABLE));
-    assert!(
-        started.elapsed() < Duration::from_millis(350),
-        "{:?}",
-        started.elapsed()
-    );
+    // Sleeping through the 3 s Retry-After would be the bug.
+    assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
     assert_eq!(received(&server).await.len(), 1);
 }
 
@@ -584,7 +586,7 @@ async fn total_timeout_shortens_a_slow_attempt() {
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(models_body())
-                .set_delay(Duration::from_millis(800)),
+                .set_delay(STALL),
         )
         .mount(&server)
         .await;
@@ -602,10 +604,10 @@ async fn total_timeout_shortens_a_slow_attempt() {
     let started = Instant::now();
     let err = client.models().list().await.unwrap_err();
     assert!(err.is_timeout(), "{err:?}");
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() < Duration::from_millis(600),
-        "{:?}",
-        started.elapsed()
+        elapsed >= Duration::from_millis(140) && elapsed < STALL / 2,
+        "{elapsed:?}"
     );
 
     let err = Client::builder()
@@ -634,4 +636,62 @@ async fn the_client_implements_system_one() {
         .await
         .unwrap();
     assert!(result.answer(&billing).unwrap().is_yes(0.9));
+}
+
+#[tokio::test]
+async fn a_retry_cut_short_by_the_total_timeout_reports_the_earlier_error() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(sequence(vec![
+            ResponseTemplate::new(503).insert_header("retry-after-ms", "60"),
+            ResponseTemplate::new(200)
+                .set_body_json(models_body())
+                .set_delay(STALL),
+        ]))
+        .mount(&server)
+        .await;
+
+    let started = Instant::now();
+    let err = client(&server)
+        .models()
+        .list()
+        .total_timeout(Duration::from_millis(150))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.status(),
+        Some(StatusCode::SERVICE_UNAVAILABLE),
+        "{err:?}"
+    );
+    assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
+    assert_eq!(received(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn credential_time_counts_against_the_total_timeout() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(models_body())
+                .set_delay(Duration::from_millis(80)),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .base_url(server.uri())
+        .retry(fast_retry())
+        .total_timeout(Duration::from_millis(100))
+        .credentials_fn(|| async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Ok::<_, kunobi_jev::BoxError>("token")
+        })
+        .build()
+        .unwrap();
+
+    let started = Instant::now();
+    let err = client.models().list().await.unwrap_err();
+    assert!(err.is_timeout(), "{err:?}");
+    assert!(started.elapsed() < STALL / 2, "{:?}", started.elapsed());
 }

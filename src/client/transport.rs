@@ -101,16 +101,26 @@ impl Client {
             headers.remove(CONTENT_TYPE);
         }
 
+        // The previous attempt's error, returned when the total timeout ends a retry early:
+        // "503, then out of time" says more than a bare timeout.
+        let mut previous: Option<Error> = None;
+        let total = req.total_timeout.unwrap_or(req.timeout);
         let mut attempt: u32 = 0;
         loop {
             let retries_left = req.retry.max_retries - attempt;
-            let timeout = attempt_timeout(req.timeout, req.total_timeout, deadline)?;
             if attempt > 0 {
                 span.record("http.request.resend_count", attempt);
             }
+            let Some(budget) = attempt_budget(req.timeout, deadline) else {
+                return Err(previous.unwrap_or(Error::Timeout { timeout: total }));
+            };
 
             // Asked per attempt so a provider can refresh an expiring token between retries.
-            let authorization = inner.credentials.authorization(timeout).await?;
+            let authorization = inner.credentials.authorization(budget).await?;
+            // The provider's time comes out of the total budget.
+            let Some(timeout) = attempt_budget(req.timeout, deadline) else {
+                return Err(previous.unwrap_or(Error::Timeout { timeout: total }));
+            };
             let mut attempt_headers = headers.clone();
             attempt_headers.insert(AUTHORIZATION, authorization);
             if attempt > 0 {
@@ -137,6 +147,10 @@ impl Client {
             let (status, response_headers, body) = match outcome {
                 Ok(response) => response,
                 Err(err) => {
+                    let cut_by_total = err.is_timeout() && timeout < req.timeout;
+                    if cut_by_total && let Some(previous) = previous {
+                        return Err(previous);
+                    }
                     if retries_left == 0 || !req.retry.is_retryable_error(&err) {
                         return Err(err);
                     }
@@ -145,6 +159,7 @@ impl Client {
                         return Err(err);
                     }
                     backoff(&tag, attempt, retries_left, &err.to_string(), delay).await;
+                    previous = Some(err);
                     attempt += 1;
                     continue;
                 }
@@ -152,10 +167,6 @@ impl Client {
 
             let request_id = request_id_from(&response_headers);
             let elapsed_ms = started.elapsed().as_millis() as u64;
-            span.record("http.response.status_code", status.as_u16());
-            if let Some(id) = &request_id {
-                span.record("typesafe.request_id", id.as_str());
-            }
             tracing::info!(
                 attempt,
                 http.response.status_code = status.as_u16(),
@@ -173,6 +184,7 @@ impl Client {
             }
 
             if status.is_success() {
+                record_response(&span, status, request_id.as_deref());
                 return Ok(RawResponse {
                     status,
                     headers: response_headers,
@@ -183,16 +195,19 @@ impl Client {
 
             let error = ApiError::from_response(status, response_headers, &body);
             if retries_left == 0 || !req.retry.is_retryable_status(status.as_u16()) {
+                record_response(&span, status, request_id.as_deref());
                 return Err(error.into());
             }
             let delay = req
                 .retry
                 .delay(attempt, Some(error.headers()), fastrand::f64());
             if !fits_before(deadline, delay) {
+                record_response(&span, status, request_id.as_deref());
                 return Err(error.into());
             }
             let reason = status.as_u16().to_string();
             backoff(&tag, attempt, retries_left, &reason, delay).await;
+            previous = Some(error.into());
             attempt += 1;
         }
     }
@@ -245,20 +260,23 @@ impl Client {
     }
 }
 
-/// The timeout for the next attempt: the per-attempt timeout, cut to what is left of the total.
-fn attempt_timeout(
-    per_attempt: Duration,
-    total: Option<Duration>,
-    deadline: Option<Instant>,
-) -> Result<Duration> {
-    let (Some(total), Some(deadline)) = (total, deadline) else {
-        return Ok(per_attempt);
+/// The timeout for the next attempt: the per-attempt timeout, cut to what is left of the
+/// total. `None` once the total timeout has passed.
+fn attempt_budget(per_attempt: Duration, deadline: Option<Instant>) -> Option<Duration> {
+    let Some(deadline) = deadline else {
+        return Some(per_attempt);
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(Error::Timeout { timeout: total });
+    (!remaining.is_zero()).then(|| per_attempt.min(remaining))
+}
+
+/// Record the response that ends the call. Retried responses are not recorded, so a call
+/// that ends in a timeout doesn't carry an earlier attempt's status.
+fn record_response(span: &tracing::Span, status: StatusCode, request_id: Option<&str>) {
+    span.record("http.response.status_code", status.as_u16());
+    if let Some(id) = request_id {
+        span.record("typesafe.request_id", id);
     }
-    Ok(per_attempt.min(remaining))
 }
 
 /// Whether waiting `delay` still leaves time for another attempt before the deadline.

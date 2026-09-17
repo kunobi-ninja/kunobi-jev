@@ -52,7 +52,7 @@ enum Scripted {
     Raw(Answer),
 }
 
-type ErrorFactory = Box<dyn Fn() -> Error + Send + Sync>;
+type ErrorFactory = Arc<dyn Fn() -> Error + Send + Sync>;
 
 #[derive(Default)]
 struct State {
@@ -129,7 +129,7 @@ impl FakeSystemOne {
 
     /// Fail every request with the error `error` builds.
     pub fn fail_with(self, error: impl Fn() -> Error + Send + Sync + 'static) -> Self {
-        self.lock().failure = Some(Box::new(error));
+        self.lock().failure = Some(Arc::new(error));
         self
     }
 
@@ -139,14 +139,19 @@ impl FakeSystemOne {
     }
 
     fn respond(&self, request: SystemOneRequest) -> Result<SystemOneResult> {
-        let mut state = self.lock();
-        state.requests.push(request.clone());
+        let failure = {
+            let mut state = self.lock();
+            state.requests.push(request.clone());
+            state.failure.clone()
+        };
         // The same checks the client runs before sending.
         request.to_body(FAKE_MODEL)?;
-        if let Some(failure) = &state.failure {
+        // Called without the lock, so the closure may use the fake.
+        if let Some(failure) = failure {
             return Err(failure());
         }
 
+        let state = self.lock();
         let mut answers = IndexMap::new();
         for (name, question) in request.questions.iter() {
             let scripted = state.answers.get(name).ok_or_else(|| {
@@ -188,10 +193,22 @@ fn fit(name: &str, question: &Question, scripted: &Scripted) -> Result<Answer> {
     let mismatch = |detail: String| {
         Error::InvalidRequest(format!("FakeSystemOne answer for \"{name}\" {detail}."))
     };
+    let probability = |value: f64| {
+        if (0.0..=1.0).contains(&value) {
+            Ok(value)
+        } else {
+            Err(mismatch(format!(
+                "has probability {value}; use a value between 0 and 1"
+            )))
+        }
+    };
     match (question, scripted) {
         (_, Scripted::Raw(answer)) => Ok(answer.clone()),
-        (Question::Noul(_), Scripted::Noul(noul)) => Ok(Answer::Noul(NoulAnswer { noul: *noul })),
+        (Question::Noul(_), Scripted::Noul(noul)) => Ok(Answer::Noul(NoulAnswer {
+            noul: probability(*noul)?,
+        })),
         (Question::Choice(choice), Scripted::Choice { label, confidence }) => {
+            let confidence = &probability(*confidence)?;
             if !choice.criteria.contains_key(label) {
                 let labels: Vec<_> = choice.criteria.keys().map(String::as_str).collect();
                 return Err(mismatch(format!(
@@ -219,6 +236,7 @@ fn fit(name: &str, question: &Question, scripted: &Scripted) -> Result<Answer> {
             }))
         }
         (Question::Score(rubric), Scripted::Score { score, confidence }) => {
+            let confidence = &probability(*confidence)?;
             let top = (rubric.criteria.len() - 1) as f64;
             if !(0.0..=top).contains(score) {
                 return Err(mismatch(format!("has score {score}, outside 0..={top}")));
@@ -293,7 +311,12 @@ mod tests {
         assert_eq!(order, ["calm", "angry", "sad"]);
         assert!((tone.probability("calm").unwrap() - 0.15).abs() < 1e-9);
 
+        assert_eq!(tone.probability("angry"), Some(0.7));
+        assert_eq!(tone.confidence, 0.7);
+
         let urgency = result.answer(&urgency).unwrap();
+        assert_eq!(urgency.score, 1.6);
+        assert_eq!(urgency.confidence, 0.5);
         assert_eq!(urgency.most_likely_level(), Some(2));
         assert_eq!(urgency.legend[&0], Value::from("low"));
         assert_eq!(result.model, FAKE_MODEL);
@@ -345,5 +368,60 @@ mod tests {
         let err = ask(&fake, questions).unwrap_err();
         assert_eq!(err.to_string(), "boom");
         assert_eq!(fake.clone().requests().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod script_checks {
+    use super::*;
+    use crate::questions::{Questions, choice_labels, noul, score};
+
+    #[test]
+    fn probabilities_outside_zero_to_one_are_rejected() {
+        let mut questions = Questions::new();
+        questions.add("tone", choice_labels("Tone?", ["calm", "angry"]));
+        questions.add("urgent", noul("Urgent?"));
+        questions.add("level", score("Level?", ["low", "high"]));
+        let cases = [
+            FakeSystemOne::new()
+                .choice("tone", "angry", 1.5)
+                .noul("urgent", 0.5)
+                .score("level", 1.0, 0.5),
+            FakeSystemOne::new()
+                .choice("tone", "angry", 0.5)
+                .noul("urgent", -0.1)
+                .score("level", 1.0, 0.5),
+            FakeSystemOne::new()
+                .choice("tone", "angry", 0.5)
+                .noul("urgent", 0.5)
+                .score("level", 1.0, f64::NAN),
+        ];
+        for fake in cases {
+            let err = fake
+                .respond(SystemOneRequest::new("s", questions.clone()))
+                .unwrap_err();
+            assert!(err.to_string().contains("between 0 and 1"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_failure_closure_can_use_the_fake() {
+        let fake = FakeSystemOne::new();
+        let inner = fake.clone();
+        let fake = fake.fail_with(move || {
+            Error::InvalidRequest(format!("seen {} requests", inner.requests().len()))
+        });
+        let mut questions = Questions::new();
+        questions.add("q", noul("q"));
+
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = fake.respond(SystemOneRequest::new("s", questions));
+            done.send(result.unwrap_err().to_string()).unwrap();
+        });
+        let message = finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("fail_with closure deadlocked on the fake's lock");
+        assert_eq!(message, "seen 1 requests");
     }
 }

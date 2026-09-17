@@ -152,6 +152,12 @@ impl<L> Clone for TypedChoice<L> {
     }
 }
 
+impl<L> PartialEq for TypedChoice<L> {
+    fn eq(&self, other: &Self) -> bool {
+        self.question == other.question
+    }
+}
+
 impl<L> fmt::Debug for TypedChoice<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("TypedChoice").field(&self.question).finish()

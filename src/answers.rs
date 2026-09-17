@@ -98,12 +98,12 @@ pub struct TypedChoiceAnswer<L> {
 }
 
 impl<L: Labels> TypedChoiceAnswer<L> {
-    /// The probability of a label, or `0.0` when the response did not include it.
-    pub fn probability(&self, label: L) -> f64 {
+    /// The probability of a label, or `None` when the response did not include it.
+    pub fn probability(&self, label: L) -> Option<f64> {
         self.probabilities
             .iter()
             .find(|(candidate, _)| *candidate == label)
-            .map_or(0.0, |(_, p)| *p)
+            .map(|(_, p)| *p)
     }
 
     /// The selected label, if confidence reaches `min_confidence`.
@@ -333,7 +333,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(department.choice, Department::Technical);
-        assert_eq!(department.probability(Department::Billing), 0.159);
+        assert_eq!(department.probability(Department::Billing), Some(0.159));
         let order: Vec<_> = department.probabilities.iter().map(|(l, _)| *l).collect();
         assert_eq!(
             order,

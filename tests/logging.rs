@@ -91,3 +91,65 @@ async fn logs_never_contain_the_key_and_skip_bodies_by_default() {
         assert!(verbose.contains(marker), "{marker} missing: {verbose}");
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_final_timeout_does_not_carry_an_earlier_status() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let server = MockServer::start().await;
+    let calls = AtomicUsize::new(0);
+    Mock::given(path("/v1/models"))
+        .respond_with(move |_: &wiremock::Request| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"models": []}))
+                    .set_delay(Duration::from_millis(300))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let logs = Logs::default();
+    let sink = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let err = Client::builder()
+        .api_key(SECRET)
+        .base_url(server.uri())
+        .timeout(Duration::from_millis(50))
+        .retry(kunobi_jev::RetryPolicy {
+            max_retries: 1,
+            backoff_initial: Duration::from_millis(1),
+            backoff_jitter: 0.0,
+            ..Default::default()
+        })
+        .build()
+        .unwrap()
+        .models()
+        .list()
+        .await
+        .unwrap_err();
+    assert!(err.is_timeout(), "{err:?}");
+
+    let text = logs.text();
+    let timed_out = text
+        .lines()
+        .find(|line| line.contains("timed out after"))
+        .unwrap_or_else(|| panic!("no timeout line: {text}"));
+    assert!(
+        timed_out.contains("http.request.resend_count=1"),
+        "{timed_out}"
+    );
+    assert!(
+        !timed_out.contains("http.response.status_code=503"),
+        "{timed_out}"
+    );
+}

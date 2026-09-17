@@ -139,6 +139,7 @@ impl fmt::Debug for Client {
             .field("default_model", &self.inner.default_model)
             .field("retry", &self.inner.retry)
             .field("timeout", &self.inner.timeout)
+            .field("total_timeout", &self.inner.total_timeout)
             .field("credentials", &self.inner.credentials)
             .field("log_bodies", &self.inner.log_bodies)
             .finish_non_exhaustive()

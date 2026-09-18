@@ -272,6 +272,12 @@ fn fit(name: &str, question: &Question, scripted: &Scripted) -> Result<Answer> {
                 Question::Noul(_) => "noul",
                 Question::Choice(_) => "choice",
                 Question::Score(_) => "score",
+                // A raw question carries whatever type the caller wrote, so the
+                // only script that can answer it is a raw answer.
+                Question::Raw(raw) => raw
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("raw"),
             };
             let got = match scripted {
                 Scripted::Noul(_) => "noul",

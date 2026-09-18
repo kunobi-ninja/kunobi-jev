@@ -137,6 +137,9 @@ pub enum ApiErrorKind {
     UnprocessableEntity,
     /// HTTP 429: the rate limit was exceeded.
     RateLimit,
+    /// HTTP 529: TypeSafe is temporarily overloaded. Documented as "retry after
+    /// a short delay", which the default policy already does.
+    Overloaded,
     /// HTTP 5xx: the server failed to handle the request.
     InternalServer,
     /// Any other non-2xx status.
@@ -153,6 +156,7 @@ impl ApiErrorKind {
             404 => Self::NotFound,
             422 => Self::UnprocessableEntity,
             429 => Self::RateLimit,
+            529 => Self::Overloaded,
             500.. => Self::InternalServer,
             _ => Self::Other,
         }
@@ -390,6 +394,7 @@ mod tests {
         assert_eq!(kind(422), ApiErrorKind::UnprocessableEntity);
         assert_eq!(kind(429), ApiErrorKind::RateLimit);
         assert_eq!(kind(500), ApiErrorKind::InternalServer);
+        assert_eq!(kind(529), ApiErrorKind::Overloaded);
         assert_eq!(kind(599), ApiErrorKind::InternalServer);
         assert_eq!(kind(409), ApiErrorKind::Other);
         assert_eq!(kind(302), ApiErrorKind::Other);

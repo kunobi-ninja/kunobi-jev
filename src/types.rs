@@ -102,15 +102,18 @@ impl From<Entry> for Value {
     }
 }
 
-/// Token usage for a request.
+/// Token usage for a request, when the API reports it.
+///
+/// Both counts are optional because the API does not always send them, and
+/// billing is per input token: a silent `0` would read as a free call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    /// Number of input tokens used.
+    /// Input tokens used, or `None` when the API did not report it.
     #[serde(default)]
-    pub input_tokens: u64,
-    /// Number of output tokens used.
+    pub input_tokens: Option<u64>,
+    /// Output tokens used, or `None` when the API did not report it.
     #[serde(default)]
-    pub output_tokens: u64,
+    pub output_tokens: Option<u64>,
 }
 
 /// Metadata for an available model.

@@ -5,11 +5,24 @@ use std::marker::PhantomData;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::answers::{AnswerKind, ChoiceAnswer, NoulAnswer, ScoreAnswer, TypedChoiceAnswer};
 use crate::error::{Error, Result};
 use crate::labels::Labels;
 use crate::types::Entry;
+
+/// Most options a Choice question may offer.
+///
+/// "A Choice question accepts up to 255 options", says the documentation. Past
+/// that the server refuses the request, so the check happens here rather than
+/// after a paid round trip.
+pub const MAX_CHOICE_OPTIONS: usize = 255;
+
+/// Most levels a Score question may rate against.
+///
+/// "Needs at least two levels and takes up to 10."
+pub const MAX_SCORE_LEVELS: usize = 10;
 
 /// A question, tagged by `type` on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,6 +34,31 @@ pub enum Question {
     Choice(ChoiceQuestion),
     /// A score from an ordered rubric.
     Score(ScoreQuestion),
+    /// A question this crate does not model, sent as written.
+    ///
+    /// The escape hatch both official SDKs document: a question type the API
+    /// gains before this crate does can be sent today, as long as the JSON
+    /// carries its own `type`.
+    ///
+    /// ```
+    /// use kunobi_jev::{Question, Questions};
+    /// use serde_json::json;
+    ///
+    /// let mut questions = Questions::new();
+    /// questions.insert(
+    ///     "ranking",
+    ///     Question::raw(json!({"type": "rank", "instructions": "Order these", "criteria": ["a", "b"]})),
+    /// );
+    /// ```
+    #[serde(untagged)]
+    Raw(Value),
+}
+
+impl Question {
+    /// A question sent exactly as written, for a type this crate does not model.
+    pub fn raw(question: impl Into<Value>) -> Self {
+        Question::Raw(question.into())
+    }
 }
 
 /// A yes/no question. The answer is the probability of yes.
@@ -32,6 +70,20 @@ pub struct NoulQuestion {
     /// Optional descriptions of the yes and no outcomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub criteria: Option<NoulCriteria>,
+    /// Fields this crate does not model yet, sent as written.
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+impl NoulQuestion {
+    /// Send a field this crate does not model yet.
+    ///
+    /// The forward-compatibility hook both official SDKs document, for a
+    /// question field the API gains before this crate does.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.extra.insert(key.into(), value.into());
+        self
+    }
 }
 
 /// Descriptions of the yes and no outcomes of a [`NoulQuestion`].
@@ -53,6 +105,17 @@ pub struct ChoiceQuestion {
     pub instructions: Entry,
     /// Labels mapped to descriptions; [`Entry::Null`] leaves a label undescribed.
     pub criteria: IndexMap<String, Entry>,
+    /// Fields this crate does not model yet, sent as written.
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+impl ChoiceQuestion {
+    /// Send a field this crate does not model yet.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.extra.insert(key.into(), value.into());
+        self
+    }
 }
 
 /// A question that assigns a score from an ordered rubric.
@@ -63,6 +126,17 @@ pub struct ScoreQuestion {
     pub instructions: Entry,
     /// At least two level descriptions, indexed by score from zero.
     pub criteria: Vec<Entry>,
+    /// Fields this crate does not model yet, sent as written.
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+impl ScoreQuestion {
+    /// Send a field this crate does not model yet.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.extra.insert(key.into(), value.into());
+        self
+    }
 }
 
 impl NoulQuestion {
@@ -86,6 +160,7 @@ pub fn noul(instructions: impl Into<Entry>) -> NoulQuestion {
     NoulQuestion {
         instructions: instructions.into(),
         criteria: None,
+        extra: Map::new(),
     }
 }
 
@@ -114,6 +189,7 @@ where
             .into_iter()
             .map(|(label, description)| (label.into(), description.into()))
             .collect(),
+        extra: Map::new(),
     }
 }
 
@@ -209,6 +285,7 @@ pub fn score<V: Into<Entry>>(
     ScoreQuestion {
         instructions: instructions.into(),
         criteria: levels.into_iter().map(Into::into).collect(),
+        extra: Map::new(),
     }
 }
 
@@ -342,7 +419,11 @@ impl Questions {
             .map(|(name, question)| (name.as_str(), question))
     }
 
-    /// Reject an empty set and score questions with fewer than two levels.
+    /// Reject a request the API documents as invalid, before it is sent.
+    ///
+    /// An empty set, a Choice with no options or more than
+    /// [`MAX_CHOICE_OPTIONS`], and a Score outside two to
+    /// [`MAX_SCORE_LEVELS`] levels.
     pub fn validate(&self) -> Result<()> {
         if self.0.is_empty() {
             return Err(Error::InvalidRequest(
@@ -350,13 +431,31 @@ impl Questions {
             ));
         }
         for (name, question) in &self.0 {
-            if let Question::Score(score) = question
-                && score.criteria.len() < 2
-            {
-                return Err(Error::InvalidRequest(format!(
-                    "Score question \"{name}\" has {} criteria; at least two scores are required.",
-                    score.criteria.len()
-                )));
+            match question {
+                Question::Score(score) if score.criteria.len() < 2 => {
+                    return Err(Error::InvalidRequest(format!(
+                        "Score question \"{name}\" has {} criteria; at least two scores are required.",
+                        score.criteria.len()
+                    )));
+                }
+                Question::Score(score) if score.criteria.len() > MAX_SCORE_LEVELS => {
+                    return Err(Error::InvalidRequest(format!(
+                        "Score question \"{name}\" has {} criteria; at most {MAX_SCORE_LEVELS} are accepted.",
+                        score.criteria.len()
+                    )));
+                }
+                Question::Choice(choice) if choice.criteria.is_empty() => {
+                    return Err(Error::InvalidRequest(format!(
+                        "Choice question \"{name}\" has no options."
+                    )));
+                }
+                Question::Choice(choice) if choice.criteria.len() > MAX_CHOICE_OPTIONS => {
+                    return Err(Error::InvalidRequest(format!(
+                        "Choice question \"{name}\" has {} options; at most {MAX_CHOICE_OPTIONS} are accepted.",
+                        choice.criteria.len()
+                    )));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -450,6 +549,48 @@ mod tests {
         );
     }
 
+    /// The API can gain a field, or a whole question type, before this crate
+    /// does. Both official SDKs let a caller send those anyway.
+    #[test]
+    fn unmodelled_fields_and_types_are_sent_as_written() {
+        let mut questions = Questions::new();
+        questions.add("weighted", noul("Urgent?").extra("weight", 2));
+        questions.add(
+            "tone",
+            choice_labels("Tone?", ["calm", "angry"]).extra("beam_width", 4),
+        );
+        questions.add(
+            "level",
+            score("How bad?", ["low", "high"]).extra("strict", true),
+        );
+        questions.insert(
+            "ranking",
+            Question::raw(json!({"type": "rank", "criteria": ["a", "b"]})),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&questions).unwrap(),
+            json!({
+                "weighted": {"type": "noul", "instructions": "Urgent?", "weight": 2},
+                "tone": {
+                    "type": "choice",
+                    "instructions": "Tone?",
+                    "criteria": {"calm": null, "angry": null},
+                    "beam_width": 4
+                },
+                "level": {
+                    "type": "score",
+                    "instructions": "How bad?",
+                    "criteria": ["low", "high"],
+                    "strict": true
+                },
+                "ranking": {"type": "rank", "criteria": ["a", "b"]}
+            })
+        );
+        // A raw question passes validation: its shape is the server's business.
+        assert!(questions.validate().is_ok());
+    }
+
     #[test]
     fn preserves_insertion_order() {
         let questions: Questions = [("z", noul("z")), ("a", noul("a")), ("m", noul("m"))]
@@ -459,6 +600,65 @@ mod tests {
         assert_eq!(names, ["z", "a", "m"]);
         let wire = serde_json::to_string(&questions).unwrap();
         assert!(wire.find("\"z\"").unwrap() < wire.find("\"a\"").unwrap());
+    }
+
+    #[test]
+    fn validation_rejects_what_the_api_documents_as_invalid() {
+        // Option lists are often built from data, which is how they cross 255
+        // without anyone noticing.
+        let mut wide = Questions::new();
+        wide.add(
+            "team",
+            choice_labels(
+                "Which team?",
+                (0..=MAX_CHOICE_OPTIONS).map(|n| format!("team-{n}")),
+            ),
+        );
+        let err = wide.validate().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Choice question \"team\" has 256 options; at most 255 are accepted."
+        );
+
+        let mut exact = Questions::new();
+        exact.add(
+            "team",
+            choice_labels(
+                "Which team?",
+                (0..MAX_CHOICE_OPTIONS).map(|n| format!("team-{n}")),
+            ),
+        );
+        assert!(exact.validate().is_ok(), "255 options are allowed");
+
+        let mut empty_choice = Questions::new();
+        empty_choice.add("team", choice_labels("Which team?", Vec::<String>::new()));
+        assert_eq!(
+            empty_choice.validate().unwrap_err().to_string(),
+            "Choice question \"team\" has no options."
+        );
+
+        let mut deep = Questions::new();
+        deep.add(
+            "level",
+            score(
+                "How bad?",
+                (0..=MAX_SCORE_LEVELS).map(|n| format!("level {n}")),
+            ),
+        );
+        assert_eq!(
+            deep.validate().unwrap_err().to_string(),
+            "Score question \"level\" has 11 criteria; at most 10 are accepted."
+        );
+
+        let mut ten = Questions::new();
+        ten.add(
+            "level",
+            score(
+                "How bad?",
+                (0..MAX_SCORE_LEVELS).map(|n| format!("level {n}")),
+            ),
+        );
+        assert!(ten.validate().is_ok(), "10 levels are allowed");
     }
 
     #[test]

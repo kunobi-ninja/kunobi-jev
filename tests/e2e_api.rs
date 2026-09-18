@@ -90,7 +90,7 @@ async fn answers_all_question_types() {
     let channel = result.answer(&channel).unwrap();
     assert_eq!(channel.probabilities.len(), 3);
     assert!((0.0..=1.0).contains(&urgent.noul));
-    assert!(result.usage.input_tokens > 0);
+    assert!(result.usage.input_tokens.is_some_and(|tokens| tokens > 0));
 
     println!(
         "request {:?}: department={} ({:.2}), frustration={:.2}, urgent={:.2}",

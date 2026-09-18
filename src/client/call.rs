@@ -58,7 +58,9 @@ pub struct Call<T> {
     path: &'static str,
     body: Result<Option<Bytes>>,
     timeout: Option<Duration>,
-    total_timeout: Option<Duration>,
+    /// Outer `None` means "not set, use the client's"; inner `None` means this
+    /// call removed the bound.
+    total_timeout: Option<Option<Duration>>,
     retry: Option<RetryPolicy>,
     max_retries: Option<u32>,
     headers: HeaderMap,
@@ -120,12 +122,13 @@ impl<T> Call<T> {
     }
 
     /// Upper bound for the whole call, including credentials, retries and backoff.
+    /// Pass `None` to remove the client's bound for this call.
     ///
     /// Attempts are shortened to fit the time left. A retry is skipped when its backoff
     /// would end past the bound, and a retry cut short by the bound returns the
     /// previous attempt's error, such as the 503 that caused the retry.
-    pub fn total_timeout(mut self, total_timeout: Duration) -> Self {
-        self.total_timeout = Some(total_timeout);
+    pub fn total_timeout(mut self, total_timeout: impl Into<Option<Duration>>) -> Self {
+        self.total_timeout = Some(total_timeout.into());
         self
     }
 
@@ -186,7 +189,7 @@ impl<T> Call<T> {
     fn resolve(self) -> Result<Resolved> {
         let body = self.body?;
         let timeout = validate_timeout(self.timeout.unwrap_or(self.client.timeout()))?;
-        let total_timeout = match self.total_timeout.or(self.client.total_timeout()) {
+        let total_timeout = match self.total_timeout.unwrap_or(self.client.total_timeout()) {
             Some(total) => Some(validate_timeout(total).map_err(|_| {
                 Error::Config("`total_timeout` must be a positive duration, got 0.".into())
             })?),

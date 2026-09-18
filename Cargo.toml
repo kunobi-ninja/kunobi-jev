@@ -27,6 +27,9 @@ rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 # `testing::FakeSystemOne`, a scripted `SystemOne` for tests in code that uses this crate.
 testing = []
+# `blocking::Client`, for callers with no async runtime. Brings in a Tokio
+# runtime the client drives itself.
+blocking = ["tokio/rt"]
 
 [dependencies]
 # HTTP. The TLS backend comes from this crate's `rustls` / `native-tls` features;

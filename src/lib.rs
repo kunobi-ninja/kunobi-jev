@@ -44,6 +44,9 @@
 #![warn(missing_docs)]
 
 pub mod answers;
+#[cfg(feature = "blocking")]
+#[cfg_attr(docsrs, doc(cfg(feature = "blocking")))]
+pub mod blocking;
 pub mod client;
 pub mod credentials;
 pub mod error;
@@ -74,7 +77,7 @@ pub use questions::{
     ScoreQuestion, TypedChoice, choice, choice_labels, choice_of, noul, score,
 };
 pub use request::SystemOneRequest;
-pub use retry::{DEFAULT_TIMEOUT, RetryPolicy, parse_retry_after};
+pub use retry::{DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT, RetryPolicy, parse_retry_after};
 pub use system_one::{AskFuture, SystemOne};
 pub use types::{Entry, ModelCard, Usage};
 

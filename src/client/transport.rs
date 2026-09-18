@@ -202,20 +202,27 @@ impl Client {
             }
 
             let error = ApiError::from_response(status, response_headers, &body);
-            if retries_left == 0 || !req.retry.is_retryable_status(status.as_u16()) {
+            let error = Error::from(error);
+            if retries_left == 0
+                || !(req.retry.is_retryable_status(status.as_u16())
+                    || req.retry.asks_to_retry(&error))
+            {
                 record_response(&span, status, request_id.as_deref());
-                return Err(error.into());
+                return Err(error);
             }
-            let delay = req
-                .retry
-                .delay(attempt, Some(error.headers()), fastrand::f64());
+            let headers = error
+                .api_error()
+                .map(ApiError::headers)
+                .cloned()
+                .unwrap_or_default();
+            let delay = req.retry.delay(attempt, Some(&headers), fastrand::f64());
             if !fits_before(deadline, delay) {
                 record_response(&span, status, request_id.as_deref());
-                return Err(error.into());
+                return Err(error);
             }
             let reason = status.as_u16().to_string();
             backoff(&tag, attempt, retries_left, &reason, delay).await;
-            previous = Some(error.into());
+            previous = Some(error);
             attempt += 1;
         }
     }

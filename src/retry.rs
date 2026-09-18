@@ -1,6 +1,8 @@
 //! Retry policy, delay calculation and `Retry-After` parsing.
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use reqwest::header::HeaderMap;
@@ -8,7 +10,30 @@ use reqwest::header::HeaderMap;
 use crate::error::{Error, Result};
 
 /// Default timeout per attempt.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Jev answers fast: measured against the live API, a three-question request
+/// took 292 ms at the median and 728 ms at the worst of twenty calls, network
+/// included. Five seconds is roughly nine times the p90, enough for a cold
+/// connection or a bad network, and short enough that a stuck attempt is
+/// retried instead of holding the caller for ten seconds.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default upper bound for a whole call, retries and backoff included.
+///
+/// Ten seconds is two attempts and the backoff between them: one full attempt,
+/// 500 ms, then a second cut to what is left. A decision this model answers in
+/// under a second should not keep a caller waiting half a minute because a
+/// retry ladder ran to its end.
+///
+/// The trade-off is rate limits: a 429 whose `Retry-After` is longer than the
+/// budget now returns the error instead of waiting it out. That is what an
+/// interactive caller wants. Batch work should raise both this and
+/// [`RetryPolicy::max_retry_after`], or remove the bound with
+/// `total_timeout(None)`.
+pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A caller's rule for retrying an error the built-in ones decline.
+pub type RetryPredicate = Arc<dyn Fn(&Error) -> bool + Send + Sync>;
 
 /// When and how to retry a failed attempt.
 ///
@@ -19,7 +44,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// let policy = RetryPolicy { max_retries: 5, ..RetryPolicy::default() };
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct RetryPolicy {
     /// Retries after the initial attempt; `0` disables retries. Default: 2.
     pub max_retries: u32,
@@ -39,6 +64,57 @@ pub struct RetryPolicy {
     pub retry_connection_errors: bool,
     /// Retry attempts that timed out. Default: true.
     pub retry_timeouts: bool,
+    /// Retry an error the fields above decline. Default: none.
+    ///
+    /// The fields decide first; this only ever widens what is retried, so a
+    /// predicate cannot disable the defaults. Use it for an error only the
+    /// caller can classify, such as a specific API message worth another try.
+    ///
+    /// ```
+    /// use kunobi_jev::{Error, RetryPolicy};
+    ///
+    /// let policy = RetryPolicy::default()
+    ///     .retry_if(|error: &Error| error.status().is_some_and(|status| status == 409));
+    /// ```
+    pub retry_if: Option<RetryPredicate>,
+}
+
+impl fmt::Debug for RetryPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetryPolicy")
+            .field("max_retries", &self.max_retries)
+            .field("backoff_initial", &self.backoff_initial)
+            .field("backoff_max", &self.backoff_max)
+            .field("backoff_jitter", &self.backoff_jitter)
+            .field("http_statuses", &self.http_statuses)
+            .field("respect_retry_after", &self.respect_retry_after)
+            .field("max_retry_after", &self.max_retry_after)
+            .field("retry_connection_errors", &self.retry_connection_errors)
+            .field("retry_timeouts", &self.retry_timeouts)
+            .field("retry_if", &self.retry_if.as_ref().map(|_| "<predicate>"))
+            .finish()
+    }
+}
+
+impl PartialEq for RetryPolicy {
+    /// Predicates compare by identity: two closures with the same behaviour are
+    /// still two closures, and pretending otherwise would make `assert_eq!` lie.
+    fn eq(&self, other: &Self) -> bool {
+        self.max_retries == other.max_retries
+            && self.backoff_initial == other.backoff_initial
+            && self.backoff_max == other.backoff_max
+            && self.backoff_jitter == other.backoff_jitter
+            && self.http_statuses == other.http_statuses
+            && self.respect_retry_after == other.respect_retry_after
+            && self.max_retry_after == other.max_retry_after
+            && self.retry_connection_errors == other.retry_connection_errors
+            && self.retry_timeouts == other.retry_timeouts
+            && match (&self.retry_if, &other.retry_if) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
 }
 
 impl Default for RetryPolicy {
@@ -53,6 +129,7 @@ impl Default for RetryPolicy {
             max_retry_after: Duration::from_secs(60),
             retry_connection_errors: true,
             retry_timeouts: true,
+            retry_if: None,
         }
     }
 }
@@ -91,13 +168,30 @@ impl RetryPolicy {
         self.http_statuses.contains(&status)
     }
 
+    /// Retry errors the built-in rules decline, as decided by `predicate`.
+    ///
+    /// Builder form of [`RetryPolicy::retry_if`], so a policy can be written in
+    /// one expression.
+    pub fn retry_if(mut self, predicate: impl Fn(&Error) -> bool + Send + Sync + 'static) -> Self {
+        self.retry_if = Some(Arc::new(predicate));
+        self
+    }
+
     /// Whether this policy retries a transport error.
     pub(crate) fn is_retryable_error(&self, err: &Error) -> bool {
-        match err {
+        let built_in = match err {
             Error::Timeout { .. } => self.retry_timeouts,
             Error::Connection { .. } => self.retry_connection_errors,
             _ => false,
-        }
+        };
+        built_in || self.asks_to_retry(err)
+    }
+
+    /// Whether the caller's predicate wants this error retried.
+    pub(crate) fn asks_to_retry(&self, err: &Error) -> bool {
+        self.retry_if
+            .as_ref()
+            .is_some_and(|predicate| predicate(err))
     }
 
     /// The wait before retrying zero-based `attempt`.

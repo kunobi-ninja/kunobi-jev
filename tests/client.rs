@@ -782,3 +782,91 @@ async fn waiting_for_a_slot_counts_against_the_total_timeout() {
         .unwrap_err();
     assert!(err.to_string().contains("max_concurrent_requests"), "{err}");
 }
+
+#[tokio::test]
+async fn a_client_bounds_whole_calls_by_default() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_body()))
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .api_key("k")
+        .base_url(server.uri())
+        .build()
+        .unwrap();
+    assert_eq!(
+        client.total_timeout(),
+        Some(kunobi_jev::DEFAULT_TOTAL_TIMEOUT)
+    );
+
+    // The bound is removable, for a caller who would rather let the retry
+    // policy run to its end.
+    let unbounded = Client::builder()
+        .api_key("k")
+        .base_url(server.uri())
+        .total_timeout(None)
+        .build()
+        .unwrap();
+    assert_eq!(unbounded.total_timeout(), None);
+
+    // And a call can drop the client's bound without rebuilding the client.
+    unbounded.models().list().total_timeout(None).await.unwrap();
+    client
+        .models()
+        .list()
+        .total_timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_retry_predicate_widens_what_is_retried() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(sequence(vec![
+            ResponseTemplate::new(409),
+            ResponseTemplate::new(200).set_body_json(models_body()),
+        ]))
+        .mount(&server)
+        .await;
+
+    // 409 is not retryable by default, so without the predicate this is one request.
+    let plain = client(&server).models().list().await.unwrap_err();
+    assert_eq!(plain.status(), Some(StatusCode::CONFLICT));
+    assert_eq!(received(&server).await.len(), 1);
+
+    server.reset().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(sequence(vec![
+            ResponseTemplate::new(409),
+            ResponseTemplate::new(200).set_body_json(models_body()),
+        ]))
+        .mount(&server)
+        .await;
+
+    let policy = fast_retry().retry_if(|error: &kunobi_jev::Error| {
+        error.status().is_some_and(|status| status.as_u16() == 409)
+    });
+    let models = client(&server).models().list().retry(policy).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(received(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_retry_predicate_cannot_disable_the_built_in_rules() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/models"))
+        .respond_with(sequence(vec![
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(200).set_body_json(models_body()),
+        ]))
+        .mount(&server)
+        .await;
+
+    // The predicate says no to everything; 503 is still retried.
+    let policy = fast_retry().retry_if(|_: &kunobi_jev::Error| false);
+    client(&server).models().list().retry(policy).await.unwrap();
+    assert_eq!(received(&server).await.len(), 2);
+}

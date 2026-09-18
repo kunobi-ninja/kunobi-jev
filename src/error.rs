@@ -137,6 +137,9 @@ pub enum ApiErrorKind {
     UnprocessableEntity,
     /// HTTP 429: the rate limit was exceeded.
     RateLimit,
+    /// HTTP 529: TypeSafe is temporarily overloaded. Documented as "retry after
+    /// a short delay", which the default policy already does.
+    Overloaded,
     /// HTTP 5xx: the server failed to handle the request.
     InternalServer,
     /// Any other non-2xx status.
@@ -153,6 +156,7 @@ impl ApiErrorKind {
             404 => Self::NotFound,
             422 => Self::UnprocessableEntity,
             429 => Self::RateLimit,
+            529 => Self::Overloaded,
             500.. => Self::InternalServer,
             _ => Self::Other,
         }
@@ -298,21 +302,31 @@ fn extract_message(body: &ErrorBody) -> Option<String> {
     if let Some(Value::String(text)) = error {
         return Some(text.clone());
     }
-    if let Some(text) = error.and_then(|e| e.get("message")).and_then(Value::as_str) {
-        return Some(text.to_owned());
+    if let Some(text) = error.and_then(Value::as_object).and_then(nested_message) {
+        return Some(text);
     }
     if let Some(Value::String(text)) = object.get("message") {
         return Some(text.clone());
     }
     match detail {
         Some(Value::String(text)) => Some(text.clone()),
-        Some(Value::Object(inner)) => inner
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        Some(Value::Object(inner)) => nested_message(inner),
         Some(Value::Array(errors)) => describe_validation_errors(errors),
         _ => None,
     }
+}
+
+/// The readable part of a nested error object.
+///
+/// `message` when the server wrote one. Otherwise `error_type`, which is all
+/// TypeSafe sends for some failures: an oversized request answers with
+/// `{"detail":{"error_type":"max_tokens_exceeded"}}`, and quoting that JSON at
+/// the caller is worse than naming the error.
+fn nested_message(object: &serde_json::Map<String, Value>) -> Option<String> {
+    ["message", "error_type"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_str))
+        .and_then(non_empty)
 }
 
 fn non_empty(text: &str) -> Option<String> {
@@ -380,6 +394,7 @@ mod tests {
         assert_eq!(kind(422), ApiErrorKind::UnprocessableEntity);
         assert_eq!(kind(429), ApiErrorKind::RateLimit);
         assert_eq!(kind(500), ApiErrorKind::InternalServer);
+        assert_eq!(kind(529), ApiErrorKind::Overloaded);
         assert_eq!(kind(599), ApiErrorKind::InternalServer);
         assert_eq!(kind(409), ApiErrorKind::Other);
         assert_eq!(kind(302), ApiErrorKind::Other);
@@ -400,6 +415,28 @@ mod tests {
         );
         assert_eq!(message(400, br#""quoted""#), "400 quoted");
         assert_eq!(message(502, b"Bad Gateway"), "502 Bad Gateway");
+    }
+
+    /// The live API answers an oversized request with this exact body, and the
+    /// error_type is the only thing in it worth reading.
+    #[test]
+    fn error_type_is_used_when_there_is_no_message() {
+        assert_eq!(
+            message(400, br#"{"detail":{"error_type":"max_tokens_exceeded"}}"#),
+            "400 max_tokens_exceeded"
+        );
+        assert_eq!(
+            message(400, br#"{"error":{"error_type":"rate_limited"}}"#),
+            "400 rate_limited"
+        );
+        // A message still wins when both are present.
+        assert_eq!(
+            message(
+                400,
+                br#"{"detail":{"error_type":"bad","message":"be specific"}}"#
+            ),
+            "400 be specific"
+        );
     }
 
     #[test]

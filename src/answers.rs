@@ -49,6 +49,20 @@ impl ChoiceAnswer {
     pub fn decide(&self, min_confidence: f64) -> Option<&str> {
         (self.confidence >= min_confidence).then_some(self.choice.as_str())
     }
+
+    /// Labels with their probabilities, most likely first.
+    ///
+    /// The response keeps the server's order, so acting on the runners-up means
+    /// sorting first. Ties keep the order the server sent.
+    pub fn ranked(&self) -> Vec<(&str, f64)> {
+        let mut ranked: Vec<_> = self
+            .probabilities
+            .iter()
+            .map(|(label, probability)| (label.as_str(), *probability))
+            .collect();
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+        ranked
+    }
 }
 
 /// An expected score with its rubric and probabilities.
@@ -70,6 +84,17 @@ impl ScoreAnswer {
     /// The expected score, if confidence reaches `min_confidence`.
     pub fn decide(&self, min_confidence: f64) -> Option<f64> {
         (self.confidence >= min_confidence).then_some(self.score)
+    }
+
+    /// The score on a 0 to 1 scale, or `None` without a legend to size it.
+    ///
+    /// Scores run from zero to `levels - 1`, so a top score on a four-level
+    /// rubric is a bigger number than a top score on a three-level one. Dividing
+    /// by the top level is what the documentation has callers write by hand
+    /// before combining scores from different questions.
+    pub fn normalized(&self) -> Option<f64> {
+        let top = self.legend.keys().copied().max()?;
+        (top > 0).then(|| self.score / f64::from(top))
     }
 
     /// The level with the highest probability, or `None` when the response has no probabilities.
@@ -109,6 +134,13 @@ impl<L: Labels> TypedChoiceAnswer<L> {
     /// The selected label, if confidence reaches `min_confidence`.
     pub fn decide(&self, min_confidence: f64) -> Option<L> {
         (self.confidence >= min_confidence).then_some(self.choice)
+    }
+
+    /// Labels with their probabilities, most likely first.
+    pub fn ranked(&self) -> Vec<(L, f64)> {
+        let mut ranked = self.probabilities.clone();
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+        ranked
     }
 }
 
@@ -302,7 +334,7 @@ mod tests {
     fn parses_the_documented_response() {
         let result = result();
         assert_eq!(result.model, "jev-latest");
-        assert_eq!(result.usage.input_tokens, 312);
+        assert_eq!(result.usage.input_tokens, Some(312));
 
         let department = result
             .answer(&AnswerKey::<ChoiceAnswer>::new("department"))
@@ -410,6 +442,52 @@ mod tests {
             .unwrap();
         assert!(urgent.is_yes(0.999));
         assert!(!urgent.is_yes(0.9991));
+    }
+
+    /// Combining scores from rubrics of different lengths is the documented use,
+    /// and the arithmetic is the same every time.
+    #[test]
+    fn scores_normalize_against_their_own_rubric() {
+        let answer = |score: f64, levels: u32| ScoreAnswer {
+            score,
+            confidence: 0.9,
+            legend: (0..levels).map(|level| (level, json!("level"))).collect(),
+            probabilities: BTreeMap::new(),
+        };
+        // Top of a four-level rubric and top of a three-level one both reach 1.0.
+        assert_eq!(answer(3.0, 4).normalized(), Some(1.0));
+        assert_eq!(answer(2.0, 3).normalized(), Some(1.0));
+        assert_eq!(answer(1.5, 4).normalized(), Some(0.5));
+        // No legend to size it, and a one-level legend that would divide by zero.
+        assert_eq!(answer(1.0, 0).normalized(), None);
+        assert_eq!(answer(0.0, 1).normalized(), None);
+    }
+
+    #[test]
+    fn probabilities_rank_most_likely_first() {
+        let result = result();
+        let raw = result
+            .answer(&AnswerKey::<ChoiceAnswer>::new("department"))
+            .unwrap();
+        assert_eq!(
+            raw.ranked(),
+            vec![("technical", 0.84), ("billing", 0.159), ("sales", 0.001)]
+        );
+
+        let typed = result
+            .answer(&AnswerKey::<TypedChoiceAnswer<Department>>::new(
+                "department",
+            ))
+            .unwrap();
+        let labels: Vec<_> = typed.ranked().into_iter().map(|(label, _)| label).collect();
+        assert_eq!(
+            labels,
+            [
+                Department::Technical,
+                Department::Billing,
+                Department::Sales
+            ]
+        );
     }
 
     #[test]

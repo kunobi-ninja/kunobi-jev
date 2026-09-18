@@ -18,14 +18,23 @@ Jev has three question types:
 | `choice` / `choice_labels` | which label fits | `choice`, `confidence`, `probabilities` per label |
 | `score` | where it falls on ordered levels | expected `score`, `confidence`, `legend`, `probabilities` |
 
-All questions in one call are answered against the same state in a single request.
+A Choice takes up to 255 options and a Score between 2 and 10 levels; the client
+refuses more before sending. `ScoreAnswer::normalized()` puts a score on 0 to 1 so
+rubrics of different lengths can be combined, and `ranked()` orders a choice's
+probabilities most likely first.
+
+All questions in one call are answered against the same state in a single request,
+and that is the cheap way to use it: the state is charged once however many questions
+ride along. Measured against the live API, a 24k-token state with one question costs
+24,288 input tokens and the same state with 200 questions costs 26,676, while latency
+stays flat. Asking one question per call re-sends the state every time.
 
 This is an unofficial client, maintained by Kunobi. It is not affiliated with TypeSafe.
 
 ## Install
 
 ```toml
-kunobi-jev = "0.1"
+kunobi-jev = "0.2"
 ```
 
 Calls run on Tokio.
@@ -40,7 +49,7 @@ Calls run on Tokio.
 To use the platform TLS library instead of rustls:
 
 ```toml
-kunobi-jev = { version = "0.1", default-features = false, features = ["native-tls"] }
+kunobi-jev = { version = "0.2", default-features = false, features = ["native-tls"] }
 ```
 
 ## Quick start
@@ -130,7 +139,7 @@ question, and records the requests it received:
 
 ```toml
 [dev-dependencies]
-kunobi-jev = { version = "0.1", features = ["testing"] }
+kunobi-jev = { version = "0.2", features = ["testing"] }
 ```
 
 ```rust
@@ -267,6 +276,19 @@ Errors are one `kunobi_jev::Error` enum:
 - `Decode`: a 2xx body with an unexpected shape.
 - `UnexpectedAnswer`: `result.answer(&key)` found no answer under that name, an answer of
   another type, or a label the key's enum doesn't know.
+
+## When the API grows
+
+The crate does not have to be updated first. A question field it does not model goes
+through `noul(..).extra("weight", 2)`, a whole question type through
+`Question::raw(json!({"type": "rank", …}))`, and a request field through
+`SystemOneRequest::extra`. An answer type it does not know arrives as
+`Answer::Unknown` with its JSON intact, rather than being dropped.
+
+Model names are free-form strings: `GET /v1/models` lists the aliases but versioned
+IDs work whether or not they appear there, so the crate never validates them. Aliases
+move when a release ships, so pin a versioned ID such as `jev-1.13.0` if you have
+tuned confidence thresholds, and read `result.model` to log which model answered.
 
 ## Logging
 

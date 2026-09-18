@@ -25,7 +25,9 @@ pub(crate) fn redact_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 
 /// `name` must already be lowercase, as `HeaderName` guarantees.
 fn redact(name: &str, value: &str) -> String {
-    if KEY_HEADERS.contains(&name) {
+    // The official SDKs also redact "any header whose name contains `token` or
+    // `secret`", which catches a caller's own credential headers.
+    if KEY_HEADERS.contains(&name) || name.contains("token") || name.contains("secret") {
         redact_key(value)
     } else if OPAQUE_HEADERS.contains(&name) {
         "***".to_owned()
@@ -97,5 +99,28 @@ mod tests {
         assert_eq!(get("x-api-key"), "***");
         assert_eq!(get("cookie"), "***");
         assert_eq!(get("accept"), "application/json");
+
+        // A caller's own credential header is redacted by name.
+        let mut caller = HeaderMap::new();
+        caller.insert(
+            "x-tenant-token",
+            HeaderValue::from_static("tok-abcdefghijkl"),
+        );
+        caller.insert("client-secret", HeaderValue::from_static("shhhhhhhhhhh"));
+        caller.insert("x-request-tokens", HeaderValue::from_static("42"));
+        let redacted = redact_headers(&caller);
+        let value = |name: &str| {
+            redacted
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(value("x-tenant-token"), "***ijkl");
+        assert_eq!(value("client-secret"), "***hhhh");
+        // Including a counter that merely mentions tokens: better a redacted
+        // number than a leaked key.
+        assert_eq!(value("x-request-tokens"), "***");
     }
 }

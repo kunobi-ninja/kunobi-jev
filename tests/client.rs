@@ -123,7 +123,7 @@ async fn system_one_sends_the_documented_request_and_types_answers() {
     let labels: Vec<_> = tone.probabilities.keys().collect();
     assert_eq!(labels, ["calm", "frustrated", "angry"]);
     assert_eq!(result.answer(&urgency).unwrap().probabilities[&2], 0.7);
-    assert_eq!(result.usage.output_tokens, 9);
+    assert_eq!(result.usage.output_tokens, Some(9));
 
     let requests = received(&server).await;
     let sent = &requests[0];

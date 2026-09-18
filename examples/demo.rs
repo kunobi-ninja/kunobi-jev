@@ -75,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
     );
     println!(
         "tokens       {} in / {} out",
-        result.usage.input_tokens, result.usage.output_tokens
+        // The API does not always report usage.
+        result.usage.input_tokens.unwrap_or_default(),
+        result.usage.output_tokens.unwrap_or_default()
     );
     Ok(())
 }

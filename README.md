@@ -33,6 +33,7 @@ Calls run on Tokio.
 | Feature | Default | What it does |
 | --- | --- | --- |
 | `rustls` | yes | TLS through rustls |
+| `blocking` | no | `blocking::Client`, for callers with no async runtime |
 | `native-tls` | no | TLS through the platform library (OpenSSL, Secure Transport, SChannel) |
 | `testing` | no | `testing::FakeSystemOne`, a scripted client for tests |
 
@@ -149,7 +150,7 @@ which take precedence.
 | `base_url` | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai`; must be https |
 | `default_model` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
 | `timeout` | | 10 s per attempt |
-| `total_timeout` | | none; bounds a whole call, retries included |
+| `total_timeout` | | 30 s for a whole call, retries included; `None` removes it |
 | `max_concurrent_requests` | | none; shared by clones of the client |
 | `retry` | | `RetryPolicy::default()` |
 | `default_header` | | none |
@@ -173,7 +174,24 @@ println!("request {:?}", models.request_id);
 Nothing is sent until the call is awaited. Dropping the future cancels the request
 and any pending retry. `total_timeout` bounds a whole call: attempts are shortened to
 fit the time left, a retry is skipped when its backoff would end past the bound, and a
-retry cut short by the bound returns the previous attempt's error.
+retry cut short by the bound returns the previous attempt's error. It defaults to 30 s;
+pass `None` to remove it.
+
+### Without an async runtime
+
+```toml
+kunobi-jev = { version = "0.2", features = ["blocking"] }
+```
+
+```rust
+use kunobi_jev::blocking::Client;
+
+let client = Client::new()?;
+let models = client.models()?;
+```
+
+The blocking client owns a runtime, so it refuses to run inside one: calling it from
+async code returns an error naming the async client instead of blocking that thread.
 
 ## Credentials
 
@@ -226,7 +244,9 @@ development.
 ## Retries and errors
 
 By default a call retries twice on 408, 429 and 5xx responses, connection errors
-and timeouts. Backoff starts at 500 ms, doubles up to 5 s, and subtracts up to 25%
+and timeouts, within the 30 s `total_timeout`. `RetryPolicy::retry_if` adds errors the
+built-in rules decline; it only widens what is retried, so a predicate cannot switch
+the defaults off. Backoff starts at 500 ms, doubles up to 5 s, and subtracts up to 25%
 jitter. A `retry-after-ms` or `Retry-After` header of up to 60 s replaces the
 backoff. Each retry sends `X-TypeSafe-Retry-Count`.
 

@@ -15,7 +15,7 @@ use super::env::{ENV_API_KEY, ENV_BASE_URL, ENV_DEFAULT_MODEL, read_env};
 use super::{Client, DEFAULT_BASE_URL, DEFAULT_MODEL, Inner};
 use crate::credentials::{BoxError, CredentialProvider, Credentials, FnProvider, bearer_header};
 use crate::error::{Error, Result};
-use crate::retry::{DEFAULT_TIMEOUT, RetryPolicy};
+use crate::retry::{DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT, RetryPolicy};
 
 /// Builder for [`Client`].
 ///
@@ -30,7 +30,9 @@ pub struct ClientBuilder {
     default_model: Option<String>,
     retry: Option<RetryPolicy>,
     timeout: Option<Duration>,
-    total_timeout: Option<Duration>,
+    /// Outer `None` means "not set, use the default"; inner `None` means the
+    /// caller removed the bound.
+    total_timeout: Option<Option<Duration>>,
     max_concurrent_requests: Option<usize>,
     default_headers: HeaderMap,
     http_client: Option<reqwest::Client>,
@@ -124,11 +126,13 @@ impl ClientBuilder {
         self
     }
 
-    /// Upper bound for a whole call, including credentials, retries and backoff. Default: none.
+    /// Upper bound for a whole call, including credentials, retries and backoff.
+    /// Default: [`DEFAULT_TOTAL_TIMEOUT`](crate::DEFAULT_TOTAL_TIMEOUT), 30 s.
     ///
+    /// Pass `None` to remove the bound and let the retry policy run to its end.
     /// Per-call [`Call::total_timeout`](crate::Call::total_timeout) takes precedence.
-    pub fn total_timeout(mut self, total_timeout: Duration) -> Self {
-        self.total_timeout = Some(total_timeout);
+    pub fn total_timeout(mut self, total_timeout: impl Into<Option<Duration>>) -> Self {
+        self.total_timeout = Some(total_timeout.into());
         self
     }
 
@@ -199,7 +203,8 @@ impl ClientBuilder {
         let retry = self.retry.unwrap_or_default();
         retry.validate()?;
         let timeout = validate_timeout(self.timeout.unwrap_or(DEFAULT_TIMEOUT))?;
-        if self.total_timeout.is_some_and(|total| total.is_zero()) {
+        let total_timeout = self.total_timeout.unwrap_or(Some(DEFAULT_TOTAL_TIMEOUT));
+        if total_timeout.is_some_and(|total| total.is_zero()) {
             return Err(Error::Config(
                 "`total_timeout` must be a positive duration, got 0.".into(),
             ));
@@ -239,7 +244,7 @@ impl ClientBuilder {
                 default_model,
                 retry,
                 timeout,
-                total_timeout: self.total_timeout,
+                total_timeout,
                 limiter,
                 default_headers: self.default_headers,
                 http,

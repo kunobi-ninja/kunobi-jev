@@ -117,7 +117,8 @@ impl ClientBuilder {
         self
     }
 
-    /// Timeout per attempt, including the response body. Default: 10 s.
+    /// Timeout per attempt, including the response body.
+    /// Default: [`DEFAULT_TIMEOUT`](crate::DEFAULT_TIMEOUT), 5 s.
     ///
     /// A credential provider gets the same timeout. To bound a whole call, retries
     /// included, use [`ClientBuilder::total_timeout`].
@@ -127,7 +128,7 @@ impl ClientBuilder {
     }
 
     /// Upper bound for a whole call, including credentials, retries and backoff.
-    /// Default: [`DEFAULT_TOTAL_TIMEOUT`](crate::DEFAULT_TOTAL_TIMEOUT), 30 s.
+    /// Default: [`DEFAULT_TOTAL_TIMEOUT`](crate::DEFAULT_TOTAL_TIMEOUT), 10 s.
     ///
     /// Pass `None` to remove the bound and let the retry policy run to its end.
     /// Per-call [`Call::total_timeout`](crate::Call::total_timeout) takes precedence.

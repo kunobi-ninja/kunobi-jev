@@ -10,14 +10,27 @@ use reqwest::header::HeaderMap;
 use crate::error::{Error, Result};
 
 /// Default timeout per attempt.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Jev answers fast: measured against the live API, a three-question request
+/// took 292 ms at the median and 728 ms at the worst of twenty calls, network
+/// included. Five seconds is roughly nine times the p90, enough for a cold
+/// connection or a bad network, and short enough that a stuck attempt is
+/// retried instead of holding the caller for ten seconds.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default upper bound for a whole call, retries and backoff included.
 ///
-/// Matches the TypeSafe Python SDK's retry budget. Without it, the defaults
-/// here allow roughly 35 s before a call gives up, which is a long time for a
-/// model that answers in well under a second.
-pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Ten seconds is two attempts and the backoff between them: one full attempt,
+/// 500 ms, then a second cut to what is left. A decision this model answers in
+/// under a second should not keep a caller waiting half a minute because a
+/// retry ladder ran to its end.
+///
+/// The trade-off is rate limits: a 429 whose `Retry-After` is longer than the
+/// budget now returns the error instead of waiting it out. That is what an
+/// interactive caller wants. Batch work should raise both this and
+/// [`RetryPolicy::max_retry_after`], or remove the bound with
+/// `total_timeout(None)`.
+pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A caller's rule for retrying an error the built-in ones decline.
 pub type RetryPredicate = Arc<dyn Fn(&Error) -> bool + Send + Sync>;

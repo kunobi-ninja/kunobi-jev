@@ -25,7 +25,7 @@ This is an unofficial client, maintained by Kunobi. It is not affiliated with Ty
 ## Install
 
 ```toml
-kunobi-jev = "0.1"
+kunobi-jev = "0.2"
 ```
 
 Calls run on Tokio.
@@ -40,7 +40,7 @@ Calls run on Tokio.
 To use the platform TLS library instead of rustls:
 
 ```toml
-kunobi-jev = { version = "0.1", default-features = false, features = ["native-tls"] }
+kunobi-jev = { version = "0.2", default-features = false, features = ["native-tls"] }
 ```
 
 ## Quick start
@@ -130,7 +130,7 @@ question, and records the requests it received:
 
 ```toml
 [dev-dependencies]
-kunobi-jev = { version = "0.1", features = ["testing"] }
+kunobi-jev = { version = "0.2", features = ["testing"] }
 ```
 
 ```rust
